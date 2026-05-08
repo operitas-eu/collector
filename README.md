@@ -1,10 +1,12 @@
-# collector
+# Operitas Collector
 
-Read-only DORA evidence collector. Part of the Operitas platform — see
-`PROJECT_MANIFEST.md` at the repo root for full context.
+Read-only DORA evidence collector. Runs inside your infrastructure and ships
+signed event envelopes to the Operitas ingest API over mTLS — nothing else.
 
-Licensed under MIT. Customers are encouraged to read and audit this code; the
-permissive license removes legal friction from that review.
+The collector is open-source (MIT) so you can read, audit, and verify it before
+deploying it to your environment. The wider Operitas platform (ingest pipeline,
+classification agent, ledger, compliance portal) is closed-source SaaS operated
+by ReOps Tech S.R.L. in the EU. Learn more at [operitas.eu](https://operitas.eu).
 
 ## What this collector reads
 
@@ -34,7 +36,6 @@ cross-event correlation without transmitting raw PII.
 ## Running locally
 
 ```bash
-cd collector
 go build ./cmd/collector
 OPERITAS_CONFIG_FILE=./testdata/config-dev.yaml ./collector
 ```
@@ -42,10 +43,17 @@ OPERITAS_CONFIG_FILE=./testdata/config-dev.yaml ./collector
 ## Testing
 
 ```bash
-cd collector
 go test ./...
 ```
 
 ## Deploying
 
 See `helm/collector/README.md` for the Helm installation guide.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the disclosure policy.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

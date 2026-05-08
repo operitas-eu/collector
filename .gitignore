@@ -1,0 +1,24 @@
+# Build artefacts
+/dist/
+/build/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Helm
+*.tgz
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local env
+.env
+.env.local
+
+# Local-only Claude Code state
+.claude/agent-memory/
+.claude/settings.local.json

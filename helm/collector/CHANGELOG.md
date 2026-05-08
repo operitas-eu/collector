@@ -1,5 +1,12 @@
 # Changelog — collector Helm Chart
 
+## 0.2.0 — 2026-05-08
+
+### Changed
+- Chart renamed from `operitas-col` to `collector` following repo extraction
+  into `github.com/operitas-eu/collector`. All template helper names updated
+  to `collector.*`. No functional change to rendered manifests.
+
 ## 0.1.0 — 2026-05-07
 
 Initial release. MVP scope per manifest §10.1.

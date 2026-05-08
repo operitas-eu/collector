@@ -1,0 +1,49 @@
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - gosec
+    - revive
+    - gofmt
+    - goimports
+    - ineffassign
+    - unused
+
+linters-settings:
+  goimports:
+    local-prefixes: operitas.eu/collector
+
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+      - name: var-naming
+        severity: warning
+      - name: package-comments
+        severity: warning
+        disabled: true
+
+  gosec:
+    # G115: integer overflow on conversion — noisy on Go 1.22+ without being
+    # actionable; exclude until gosec upstream resolves false-positive rate.
+    excludes:
+      - G115
+
+issues:
+  # Show all issues, not just first 3 per linter.
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+  exclude-rules:
+    # Test files: relax gosec (e.g. hardcoded credentials in test fixtures are
+    # intentional) and errcheck (t.Log return values don't need checking).
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck

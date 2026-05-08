@@ -1,0 +1,219 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create GitHub release and upload assets
+  packages: write   # push to ghcr.io
+  id-token: write   # sigstore keyless signing via OIDC
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/collector
+
+jobs:
+  build-binaries:
+    name: Build and sign Go binaries
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go mod download
+        run: go mod download
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          TAG="${{ github.ref_name }}"
+          OUTPUT="collector-${TAG}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build \
+            -trimpath \
+            -buildvcs=false \
+            -ldflags="-s -w -buildid= -X main.version=${TAG}" \
+            -o "${OUTPUT}" \
+            ./cmd/collector
+          echo "BINARY=${OUTPUT}" >> "$GITHUB_ENV"
+
+      - name: Compute checksum
+        run: sha256sum "${{ env.BINARY }}" > "${{ env.BINARY }}.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign binary (keyless)
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle "${{ env.BINARY }}.cosign.bundle" \
+            "${{ env.BINARY }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ env.BINARY }}
+            ${{ env.BINARY }}.sha256
+            ${{ env.BINARY }}.cosign.bundle
+          retention-days: 1
+
+  security-scan:
+    name: Trivy FS scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.31.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+  build-image:
+    name: Build, push, and sign container image
+    runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_VERSION=${{ github.ref_name }}
+          # Reproducible: no embedded timestamps via SOURCE_DATE_EPOCH in Dockerfile
+          provenance: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        run: |
+          cosign sign \
+            --yes \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}"
+
+  package-helm:
+    name: Package and push Helm chart to OCI
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+
+      - name: Log in to GHCR (Helm OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login \
+            ${{ env.REGISTRY }} \
+            --username ${{ github.actor }} \
+            --password-stdin
+
+      - name: Package chart
+        run: |
+          TAG="${{ github.ref_name }}"
+          # Strip leading 'v' for Helm chart version (SemVer without prefix)
+          VERSION="${TAG#v}"
+          helm package helm/collector --version "${VERSION}" --app-version "${TAG}"
+          echo "CHART_PKG=collector-${VERSION}.tgz" >> "$GITHUB_ENV"
+
+      - name: Push chart to OCI registry
+        run: |
+          helm push "${{ env.CHART_PKG }}" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
+
+      - name: Upload chart artifact (for release attachment)
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: ${{ env.CHART_PKG }}
+          retention-days: 1
+
+  create-release:
+    name: Create GitHub release
+    needs: [build-binaries, security-scan, build-image, package-helm]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create combined checksums file
+        working-directory: release-assets
+        run: |
+          # Merge per-binary sha256 files into one manifest
+          cat *.sha256 > SHA256SUMS
+          rm *.sha256
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/collector-*
+            release-assets/SHA256SUMS
+            release-assets/*.cosign.bundle
+            release-assets/*.tgz
