@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "collector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collector.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "collector.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "collector.selectorLabels" . | nindent 8 }}
+      annotations:
+        # Force rollout on ConfigMap change.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "collector.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+
+      containers:
+        - name: collector
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+
+          env:
+            - name: OPERITAS_CONFIG_FILE
+              value: /etc/operitas/config/config.yaml
+            - name: LOG_LEVEL
+              value: info
+
+          # Source credentials from the customer-managed Secret.
+          # The Secret must be created before installing the chart.
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secretName }}
+                optional: true
+
+          ports:
+            - name: github-webhook
+              containerPort: {{ .Values.ports.githubWebhook }}
+              protocol: TCP
+            - name: pd-webhook
+              containerPort: {{ .Values.ports.pagerdutyWebhook }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.ports.metrics }}
+              protocol: TCP
+
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/operitas/config
+              readOnly: true
+            - name: mtls-certs
+              mountPath: /etc/operitas/tls
+              readOnly: true
+            {{- if .Values.ingest.caSecretName }}
+            - name: ca-cert
+              mountPath: /etc/operitas/ca
+              readOnly: true
+            {{- end }}
+            - name: wal
+              mountPath: /var/lib/operitas
+            # tmpfs for any runtime scratch space that cannot go to the WAL PVC.
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "collector.fullname" . }}
+        - name: mtls-certs
+          secret:
+            secretName: {{ .Values.ingest.tlsSecretName }}
+            defaultMode: 0400
+        {{- if .Values.ingest.caSecretName }}
+        - name: ca-cert
+          secret:
+            secretName: {{ .Values.ingest.caSecretName }}
+            defaultMode: 0400
+        {{- end }}
+        - name: wal
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "collector.fullname" . }}-wal
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        # tmpfs — not used by the collector today but required because the root
+        # FS is read-only and some Go runtime internals need a writable /tmp.
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 32Mi
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

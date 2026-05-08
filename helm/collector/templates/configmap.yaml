@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "collector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collector.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    tenant_id: {{ required "tenantId is required" .Values.tenantId | quote }}
+    collector_id: {{ required "collectorId is required" .Values.collectorId | quote }}
+
+    ingest:
+      endpoint: {{ .Values.ingest.endpoint | quote }}
+      tls_cert_file: /etc/operitas/tls/tls.crt
+      tls_key_file: /etc/operitas/tls/tls.key
+      {{- if .Values.ingest.caSecretName }}
+      tls_ca_file: /etc/operitas/ca/ca.crt
+      {{- end }}
+      batch_max_events: 1000
+      batch_max_bytes: 1048576
+      batch_flush_interval: 250ms
+      backoff_initial: 1s
+      backoff_max: 5m
+
+    sources:
+      cloudtrail:
+        enabled: {{ .Values.sources.cloudtrail.enabled }}
+        bucket_name: {{ .Values.sources.cloudtrail.bucketName | quote }}
+        bucket_region: {{ .Values.sources.cloudtrail.bucketRegion | quote }}
+        prefix: {{ .Values.sources.cloudtrail.prefix | quote }}
+        poll_interval: {{ .Values.sources.cloudtrail.pollInterval | quote }}
+
+      github:
+        enabled: {{ .Values.sources.github.enabled }}
+        org: {{ .Values.sources.github.org | quote }}
+        repos: {{ toJson .Values.sources.github.repos }}
+        webhook_port: {{ .Values.sources.github.webhookPort }}
+        poll_interval: {{ .Values.sources.github.pollInterval | quote }}
+
+      pagerduty:
+        enabled: {{ .Values.sources.pagerduty.enabled }}
+        webhook_port: {{ .Values.sources.pagerduty.webhookPort }}
+
+    redact:
+      hash_pii: {{ .Values.redact.hashPii }}
+
+    metrics:
+      port: {{ .Values.metrics.port }}

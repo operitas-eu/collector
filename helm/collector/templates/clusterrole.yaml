@@ -1,0 +1,30 @@
+# The collector's ClusterRole intentionally uses ONLY get/list/watch verbs.
+# It must never be granted create, update, patch, delete, or escalate.
+# This is audited as part of the read-only posture requirement (manifest §3.2).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "collector.fullname" . }}
+  labels:
+    {{- include "collector.labels" . | nindent 4 }}
+rules:
+  # The collector does not need any Kubernetes API access in the MVP.
+  # This placeholder role exists so that the ServiceAccount exists and is
+  # ready when k8s.audit source is enabled in a future release.
+  # When that source is added, only get/list/watch will be added here.
+  []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "collector.fullname" . }}
+  labels:
+    {{- include "collector.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "collector.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "collector.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

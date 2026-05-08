@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "collector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "collector.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "collector.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: github-webhook
+      port: {{ .Values.ports.githubWebhook }}
+      targetPort: github-webhook
+      protocol: TCP
+    - name: pd-webhook
+      port: {{ .Values.ports.pagerdutyWebhook }}
+      targetPort: pd-webhook
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP

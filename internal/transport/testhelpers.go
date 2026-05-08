@@ -1,0 +1,44 @@
+//go:build !production
+
+// testhelpers.go exposes types and constructors needed by the transport package
+// tests. The build tag ensures nothing here ships in a production binary.
+package transport
+
+import (
+	"context"
+	"net/http"
+	"time"
+)
+
+// TestClientConfig returns a ClientConfig suitable for unit tests.
+// It uses the given URL and WAL dir, with fast flush/backoff settings.
+func TestClientConfig(url, walDir string) ClientConfig {
+	return ClientConfig{
+		Endpoint:           url,
+		CollectorID:        "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		TenantID:           "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		WALDir:             walDir,
+		BatchMaxEvents:     1000,
+		BatchMaxBytes:      1 * 1024 * 1024,
+		BatchFlushInterval: 100 * time.Millisecond,
+		BackoffInitial:     50 * time.Millisecond,
+		BackoffMax:         200 * time.Millisecond,
+	}
+}
+
+// NewTestClient creates a Client that uses the provided http.Client instead of
+// building an mTLS one. Intended for integration tests against httptest servers.
+func NewTestClient(ctx context.Context, cfg ClientConfig, httpClient *http.Client) (*Client, error) {
+	c := &Client{
+		cfg:     cfg,
+		httpCl:  httpClient,
+		flushCh: make(chan struct{}, 1),
+		done:    make(chan struct{}),
+	}
+	if err := c.replayWAL(ctx); err != nil {
+		return nil, err
+	}
+	c.wg.Add(1)
+	go c.flushLoop(ctx)
+	return c, nil
+}

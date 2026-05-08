@@ -1,0 +1,17 @@
+apiVersion: v2
+name: collector
+description: Read-only DORA evidence collector for the Operitas platform.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - dora
+  - compliance
+  - evidence
+  - collector
+home: https://operitas.eu
+sources:
+  - https://github.com/operitas-eu/collector
+maintainers:
+  - name: ReOps Tech S.R.L.
+    email: security@operitas.eu

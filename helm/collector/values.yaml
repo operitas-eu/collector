@@ -1,0 +1,150 @@
+# Default values for collector.
+# Override in a separate values file; never commit tenant secrets here.
+
+image:
+  repository: ghcr.io/operitas-eu/collector
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Number of collector replicas. 1 is strongly recommended to avoid double-counting
+# events. Horizontal scaling requires external deduplication at the ingest layer.
+replicaCount: 1
+
+# Kubernetes service account. IRSA and Azure Workload Identity annotations
+# are set below to grant the pod read-only S3 access without storing credentials.
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+    # AWS IRSA — uncomment and set the role ARN:
+    # eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/collector-cloudtrail-reader
+    #
+    # Azure Workload Identity — uncomment and set:
+    # azure.workload.identity/client-id: <managed-identity-client-id>
+
+# Pod security context: run as nonroot, read-only root FS, drop all capabilities.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Persistent volume for the WAL spool. The collector writes to /var/lib/operitas/wal/
+# and must survive pod restarts without losing undelivered events.
+persistence:
+  enabled: true
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+
+# Resource limits. The collector is designed to stay under 64 MB RSS at steady state.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 128Mi
+
+# Ports exposed by the collector.
+ports:
+  githubWebhook: 8081
+  pagerdutyWebhook: 8082
+  metrics: 9090
+
+# Ingest endpoint. Must be an EU-resident host (validated at startup).
+ingest:
+  endpoint: "https://ingest.operitas.eu/v1/events:batch"
+
+  # mTLS client certificate and key. Reference an existing Secret containing
+  # tls.crt and tls.key. The collector refuses to start without these.
+  tlsSecretName: "collector-mtls"
+
+  # Optional: PEM file for the server CA. Leave empty to use the system cert pool.
+  caSecretName: ""
+
+# Tenant and collector identity. tenant_id and collector_id are UUIDs.
+# These are written into the ConfigMap; they are not secret.
+tenantId: ""
+collectorId: ""
+
+# Source configuration. All sources are disabled by default; enable
+# only what the customer has connected.
+sources:
+  cloudtrail:
+    enabled: false
+    bucketName: ""
+    # bucketRegion MUST be an EU AWS region. The collector validates this.
+    # Permitted: eu-central-1, eu-central-2, eu-west-1, eu-west-2, eu-west-3,
+    #            eu-north-1, eu-south-1, eu-south-2
+    bucketRegion: "eu-central-1"
+    prefix: "AWSLogs/"
+    pollInterval: "5m"
+
+  github:
+    enabled: false
+    org: ""
+    # Optional: specific repos to watch. If empty, all org repos are polled.
+    repos: []
+    webhookPort: 8081
+    pollInterval: "60s"
+    # Token and webhook secret are injected from the Secret (see secretName below).
+
+  pagerduty:
+    enabled: false
+    webhookPort: 8082
+    # Signing secret is injected from the Secret (see secretName below).
+
+# Name of the Secret holding source credentials.
+# Expected keys: OPERITAS_GITHUB_TOKEN, OPERITAS_GITHUB_WEBHOOK_SECRET,
+#                OPERITAS_PD_SIGNING_SECRET, OPERITAS_REDACT_HASH_KEY
+secretName: "collector-secrets"
+
+# PII redaction policy. Default: hard redact (strip the field entirely).
+redact:
+  hashPii: false
+  # hashKey is read from the Secret when hashPii is true.
+
+metrics:
+  port: 9090
+
+# NetworkPolicy controls. By default:
+#   - Inbound: only webhook ports (from within the cluster) + metrics port
+#   - Outbound: only the configured ingest endpoint (all other egress denied)
+networkPolicy:
+  enabled: true
+  # ingressCidr restricts who can reach the webhook ports. Set to the CIDR of
+  # your GitHub/PagerDuty ingress controller or VPN tunnel.
+  ingressCidr: ""
+  # egressCidr is the CIDR of the ingest endpoint. The collector uses DNS so
+  # you typically set this to the /32 of ingest.operitas.eu's resolved IP, or
+  # the VPN gateway.
+  egressCidr: ""
+
+# Probe configuration.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 30
+
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
