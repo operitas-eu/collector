@@ -26,7 +26,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -34,23 +36,25 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
+	"operitas.eu/collector/internal/ptrs"
 	"operitas.eu/collector/internal/redact"
+	internalrt "operitas.eu/collector/internal/runtime"
 )
 
 // Source polls an S3 bucket for CloudTrail log files and emits canonical events.
 type Source struct {
-	cfg     config.CloudTrailConfig
-	s3      *s3.Client
-	redact  *redact.Redactor
-	emit    func(envelope.Event)
-	// lastKey is the last S3 object key processed; used to avoid reprocessing.
+	cfg        config.CloudTrailConfig
+	s3         *s3.Client
+	redact     *redact.Redactor
+	emit       func(envelope.Event)
+	cursorPath string
+	// lastKey is the last S3 object key processed; persisted to cursorPath.
 	lastKey string
 }
 
 // New constructs a CloudTrail source. It loads AWS credentials from the
 // environment (IAM role assumed via IRSA in the Helm chart).
 func New(ctx context.Context, cfg config.CloudTrailConfig, r *redact.Redactor, emit func(envelope.Event)) (*Source, error) {
-	// Load AWS config. The region must be EU (validated by the config package).
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
 		awsconfig.WithRegion(cfg.BucketRegion),
 	)
@@ -58,12 +62,33 @@ func New(ctx context.Context, cfg config.CloudTrailConfig, r *redact.Redactor, e
 		return nil, fmt.Errorf("cloudtrail: load aws config: %w", err)
 	}
 
-	return &Source{
-		cfg:    cfg,
-		s3:     s3.NewFromConfig(awsCfg),
-		redact: r,
-		emit:   emit,
-	}, nil
+	s := &Source{
+		cfg:        cfg,
+		s3:         s3.NewFromConfig(awsCfg),
+		redact:     r,
+		emit:       emit,
+		cursorPath: cfg.CursorPath,
+	}
+	if data, err := os.ReadFile(s.cursorPath); err == nil {
+		s.lastKey = strings.TrimSpace(string(data))
+	} else if !os.IsNotExist(err) {
+		slog.Warn("cloudtrail: cursor read failed; starting from beginning", "path", s.cursorPath, "err", err)
+	}
+	return s, nil
+}
+
+func (s *Source) writeCursor() {
+	if s.cursorPath == "" {
+		return
+	}
+	tmp := s.cursorPath + ".tmp"
+	if err := os.WriteFile(tmp, []byte(s.lastKey), 0o600); err != nil {
+		slog.Warn("cloudtrail: cursor write failed", "err", err)
+		return
+	}
+	if err := os.Rename(tmp, s.cursorPath); err != nil {
+		slog.Warn("cloudtrail: cursor rename failed", "err", err)
+	}
 }
 
 // Run polls the S3 bucket on the configured interval until ctx is cancelled.
@@ -73,33 +98,21 @@ func (s *Source) Run(ctx context.Context) error {
 		"region", s.cfg.BucketRegion,
 		"poll_interval", s.cfg.PollInterval,
 	)
-
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
-
-	// Poll once immediately.
-	if err := s.poll(ctx); err != nil {
-		slog.Error("cloudtrail poll error", "err", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if err := s.poll(ctx); err != nil {
-				slog.Error("cloudtrail poll error", "err", err)
-			}
-		}
-	}
+	return internalrt.PollLoop(ctx, s.cfg.PollInterval, "cloudtrail", s.poll)
 }
 
 func (s *Source) poll(ctx context.Context) error {
-	// ListObjectsV2 — read-only S3 call.
-	paginator := s3.NewListObjectsV2Paginator(s.s3, &s3.ListObjectsV2Input{
+	input := &s3.ListObjectsV2Input{
 		Bucket: aws.String(s.cfg.BucketName),
 		Prefix: aws.String(s.cfg.Prefix),
-	})
+	}
+	// Skip already-seen keys server-side rather than filtering after the fact.
+	if s.lastKey != "" {
+		input.StartAfter = aws.String(s.lastKey)
+	}
+	paginator := s3.NewListObjectsV2Paginator(s.s3, input)
+
+	const maxConcurrent = 8
 
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
@@ -107,25 +120,40 @@ func (s *Source) poll(ctx context.Context) error {
 			return fmt.Errorf("cloudtrail: list objects: %w", err)
 		}
 
+		var keys []string
 		for _, obj := range page.Contents {
 			key := aws.ToString(obj.Key)
 			if !strings.HasSuffix(key, ".json.gz") {
 				continue
 			}
-			// Skip already-processed keys. In production this would be backed by
-			// a cursor persisted to /var/lib/operitas/cloudtrail_cursor (future work).
-			if key <= s.lastKey {
-				continue
-			}
+			keys = append(keys, key)
+		}
 
-			if err := s.processObject(ctx, key); err != nil {
-				slog.Error("cloudtrail: process object failed",
-					"key", key,
-					"err", err,
-				)
-				continue
-			}
-			s.lastKey = key
+		sem := make(chan struct{}, maxConcurrent)
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var maxKey string
+		for _, key := range keys {
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(key string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				if err := s.processObject(ctx, key); err != nil {
+					slog.Error("cloudtrail: process object failed", "key", key, "err", err)
+					return
+				}
+				mu.Lock()
+				if key > maxKey {
+					maxKey = key
+				}
+				mu.Unlock()
+			}(key)
+		}
+		wg.Wait()
+		if maxKey > s.lastKey {
+			s.lastKey = maxKey
+			s.writeCursor()
 		}
 	}
 	return nil
@@ -222,14 +250,14 @@ func (s *Source) normalizeRecord(rec cloudTrailRecord) (envelope.Event, bool) {
 	if actorRaw == "" {
 		actorRaw = rec.UserIdentity.UserName
 	}
-	actorRedacted := s.redact.RedactActor(strPtr(actorRaw))
+	actorRedacted := s.redact.RedactActor(ptrs.String(actorRaw))
 
 	// Resource: first resource ARN, or synthesized from event source + name.
 	var resource *string
 	if len(rec.Resources) > 0 && rec.Resources[0].ARN != "" {
-		resource = strPtr(rec.Resources[0].ARN)
+		resource = ptrs.String(rec.Resources[0].ARN)
 	} else if rec.EventSource != "" {
-		resource = strPtr(rec.EventSource)
+		resource = ptrs.String(rec.EventSource)
 	}
 
 	// Build a minimal payload — omit request/response params to keep size down.
@@ -301,9 +329,3 @@ func MapEventType(eventName, eventSource string) string {
 	return "change.iac_applied"
 }
 
-func strPtr(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
-}

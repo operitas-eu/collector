@@ -6,12 +6,12 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -28,7 +28,6 @@ type Client struct {
 	httpCl   *http.Client
 	mu       sync.Mutex
 	buf      []envelope.Event
-	lastFlush time.Time
 	bufBytes int
 
 	// flushCh signals the flush loop that a batch is ready.
@@ -78,7 +77,11 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		done:    make(chan struct{}),
 	}
 
-	// Replay WAL entries from a previous run before accepting new work.
+	// Drop stale or oversized WAL entries before replaying.
+	if err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
+		slog.Warn("wal prune failed", "err", err)
+	}
+
 	if err := c.replayWAL(ctx); err != nil {
 		// Non-fatal: log and continue. Incomplete batches will be retried
 		// in the next run if they are still in the WAL.
@@ -94,7 +97,15 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 // Send enqueues an event for batched delivery. If the buffer is full by count
 // or byte size, it signals the flush loop immediately.
 func (c *Client) Send(ev envelope.Event) {
-	data, _ := json.Marshal(ev)
+	data, err := json.Marshal(ev)
+	if err != nil {
+		slog.Error("transport: drop event — marshal failed",
+			"event_type", ev.EventType,
+			"event_source", ev.EventSource,
+			"err", err,
+		)
+		return
+	}
 	evBytes := len(data)
 
 	c.mu.Lock()
@@ -307,24 +318,26 @@ func buildTLSConfig(cfg ClientConfig) (*tls.Config, error) {
 }
 
 // isTLSError checks whether an error is a TLS/certificate error that warrants
-// fail-closed behaviour (no retry, alert operator).
+// fail-closed behaviour (no retry, alert operator). Uses errors.As against the
+// concrete x509/tls error types instead of substring matching.
 func isTLSError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	tlsKeywords := []string{
-		"tls:", "x509:", "certificate", "handshake", "bad certificate",
-		"unknown authority", "verify", "remote error",
-	}
-	for _, kw := range tlsKeywords {
-		if containsFold(msg, kw) {
-			return true
-		}
+	var unknownAuthority x509.UnknownAuthorityError
+	var certInvalid x509.CertificateInvalidError
+	var hostnameErr x509.HostnameError
+	var systemRoots x509.SystemRootsError
+	var recordHeader tls.RecordHeaderError
+	var certVerify *tls.CertificateVerificationError
+	switch {
+	case errors.As(err, &unknownAuthority),
+		errors.As(err, &certInvalid),
+		errors.As(err, &hostnameErr),
+		errors.As(err, &systemRoots),
+		errors.As(err, &recordHeader),
+		errors.As(err, &certVerify):
+		return true
 	}
 	return false
-}
-
-func containsFold(s, sub string) bool {
-	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }

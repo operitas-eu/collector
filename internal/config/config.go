@@ -92,6 +92,10 @@ type CloudTrailConfig struct {
 
 	// PollInterval controls how often the S3 bucket is polled for new log files.
 	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// CursorPath is the file used to persist the last-processed S3 key so
+	// restarts skip already-seen objects. Defaults to DataDir/cloudtrail_cursor.
+	CursorPath string `yaml:"cursor_path"`
 }
 
 // GitHubConfig configures the GitHub event source (webhook + polling fallback).
@@ -201,6 +205,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sources.CloudTrail.PollInterval == 0 {
 		cfg.Sources.CloudTrail.PollInterval = 5 * time.Minute
+	}
+	if cfg.Sources.CloudTrail.CursorPath == "" {
+		cfg.Sources.CloudTrail.CursorPath = DataDir + "/cloudtrail_cursor"
 	}
 	if cfg.Sources.GitHub.WebhookPort == 0 {
 		cfg.Sources.GitHub.WebhookPort = 8081
