@@ -141,7 +141,7 @@ jobs:
           build-args: |
             BUILD_VERSION=${{ github.ref_name }}
           # Reproducible: no embedded timestamps via SOURCE_DATE_EPOCH in Dockerfile
-          provenance: false
+          provenance: mode=max
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

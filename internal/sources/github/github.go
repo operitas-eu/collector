@@ -21,22 +21,23 @@ package github
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
+	"sync"
 	"time"
 
 	gogithub "github.com/google/go-github/v63/github"
 	"golang.org/x/oauth2"
+
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
+	"operitas.eu/collector/internal/ptrs"
 	"operitas.eu/collector/internal/redact"
+	internalrt "operitas.eu/collector/internal/runtime"
+	"operitas.eu/collector/internal/sigverify"
 )
 
 // Source receives GitHub webhook events and/or polls the REST API.
@@ -50,8 +51,18 @@ type Source struct {
 // New constructs a GitHub source. It creates a read-only authenticated GitHub
 // client using the PAT from config.
 func New(cfg config.GitHubConfig, r *redact.Redactor, emit func(envelope.Event)) *Source {
+	httpCl := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 20 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			MaxIdleConnsPerHost:   8,
+		},
+	}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, httpCl)
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.Token})
-	tc := oauth2.NewClient(context.Background(), ts)
+	tc := oauth2.NewClient(ctx, ts)
 	gh := gogithub.NewClient(tc)
 
 	return &Source{
@@ -67,33 +78,9 @@ func New(cfg config.GitHubConfig, r *redact.Redactor, emit func(envelope.Event))
 func (s *Source) RunWebhook(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/github", s.handleWebhook)
-
 	addr := fmt.Sprintf(":%d", s.cfg.WebhookPort)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-	}
-
 	slog.Info("github webhook server starting", "addr", addr)
-
-	errCh := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		return fmt.Errorf("github webhook server: %w", err)
-	}
+	return internalrt.RunWebhookServer(ctx, addr, mux)
 }
 
 // RunPoller polls the GitHub API on the configured interval. It blocks until
@@ -103,24 +90,7 @@ func (s *Source) RunPoller(ctx context.Context) error {
 		"org", s.cfg.Org,
 		"poll_interval", s.cfg.PollInterval,
 	)
-
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
-
-	if err := s.poll(ctx); err != nil {
-		slog.Error("github poll error", "err", err)
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
-			if err := s.poll(ctx); err != nil {
-				slog.Error("github poll error", "err", err)
-			}
-		}
-	}
+	return internalrt.PollLoop(ctx, s.cfg.PollInterval, "github", s.poll)
 }
 
 func (s *Source) poll(ctx context.Context) error {
@@ -175,30 +145,35 @@ func (s *Source) listRepos(ctx context.Context) ([]string, error) {
 func (s *Source) pollPRs(ctx context.Context, repo string, since time.Time) error {
 	// GET /repos/{owner}/{repo}/pulls — read-only.
 	opts := &gogithub.PullRequestListOptions{
-		State:     "all",
-		Sort:      "updated",
-		Direction: "desc",
+		State:       "all",
+		Sort:        "updated",
+		Direction:   "desc",
 		ListOptions: gogithub.ListOptions{PerPage: 50},
 	}
 
-	prs, _, err := s.client.PullRequests.List(ctx, s.cfg.Org, repo, opts)
-	if err != nil {
-		return fmt.Errorf("list PRs: %w", err)
-	}
-
-	for _, pr := range prs {
-		if pr.GetUpdatedAt().Before(since) {
-			break
+	for {
+		prs, resp, err := s.client.PullRequests.List(ctx, s.cfg.Org, repo, opts)
+		if err != nil {
+			return fmt.Errorf("list PRs: %w", err)
 		}
-		ev := s.normalizePR(repo, pr)
-		s.emit(ev)
+
+		stop := false
+		for _, pr := range prs {
+			if pr.GetUpdatedAt().Before(since) {
+				stop = true
+				break
+			}
+			s.emit(s.normalizePR(repo, pr))
+		}
+		if stop || resp == nil || resp.NextPage == 0 {
+			return nil
+		}
+		opts.Page = resp.NextPage
 	}
-	return nil
 }
 
 // pollDeployments fetches recent deployments via GET /repos/{owner}/{repo}/deployments.
 func (s *Source) pollDeployments(ctx context.Context, repo string, since time.Time) error {
-	// GET /repos/{owner}/{repo}/deployments — read-only.
 	opts := &gogithub.DeploymentsListOptions{
 		ListOptions: gogithub.ListOptions{PerPage: 50},
 	}
@@ -208,50 +183,53 @@ func (s *Source) pollDeployments(ctx context.Context, repo string, since time.Ti
 		return fmt.Errorf("list deployments: %w", err)
 	}
 
+	const maxConcurrent = 8
+	sem := make(chan struct{}, maxConcurrent)
+	var wg sync.WaitGroup
 	for _, d := range deployments {
 		if d.GetCreatedAt().Before(since) {
 			continue
 		}
-
-		// GET /repos/{owner}/{repo}/deployments/{id}/statuses — read-only.
-		statuses, _, err := s.client.Repositories.ListDeploymentStatuses(
-			ctx, s.cfg.Org, repo, d.GetID(),
-			&gogithub.ListOptions{PerPage: 10},
-		)
-		if err != nil {
-			slog.Warn("github: list deployment statuses failed",
-				"repo", repo,
-				"deployment_id", d.GetID(),
-				"err", err,
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(d *gogithub.Deployment) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			statuses, _, err := s.client.Repositories.ListDeploymentStatuses(
+				ctx, s.cfg.Org, repo, d.GetID(),
+				&gogithub.ListOptions{PerPage: 10},
 			)
-		}
-
-		ev := s.normalizeDeployment(repo, d, statuses)
-		s.emit(ev)
+			if err != nil {
+				slog.Warn("github: list deployment statuses failed",
+					"repo", repo,
+					"deployment_id", d.GetID(),
+					"err", err,
+				)
+			}
+			s.emit(s.normalizeDeployment(repo, d, statuses))
+		}(d)
 	}
+	wg.Wait()
 	return nil
 }
 
 func (s *Source) normalizePR(repo string, pr *gogithub.PullRequest) envelope.Event {
 	evType := "change.merged"
-	if pr.GetMergedAt().IsZero() {
-		evType = "change.merged" // PR state changes all map to change.merged for MVP
-	}
 
 	actor := pr.GetUser().GetLogin()
-	actorRedacted := s.redact.RedactActor(strPtr(actor))
+	actorRedacted := s.redact.RedactActor(ptrs.String(actor))
 
 	payload := map[string]any{
-		"number":     pr.GetNumber(),
-		"title":      pr.GetTitle(),
-		"state":      pr.GetState(),
-		"merged":     pr.GetMerged(),
-		"base_ref":   pr.GetBase().GetRef(),
-		"head_ref":   pr.GetHead().GetRef(),
-		"head_sha":   pr.GetHead().GetSHA(),
-		"repo":       repo,
-		"org":        s.cfg.Org,
-		"html_url":   pr.GetHTMLURL(),
+		"number":   pr.GetNumber(),
+		"title":    pr.GetTitle(),
+		"state":    pr.GetState(),
+		"merged":   pr.GetMerged(),
+		"base_ref": pr.GetBase().GetRef(),
+		"head_ref": pr.GetHead().GetRef(),
+		"head_sha": pr.GetHead().GetSHA(),
+		"repo":     repo,
+		"org":      s.cfg.Org,
+		"html_url": pr.GetHTMLURL(),
 	}
 	payload = s.redact.Apply(payload)
 
@@ -267,7 +245,7 @@ func (s *Source) normalizePR(repo string, pr *gogithub.PullRequest) envelope.Eve
 		EventType:   evType,
 		EventSource: envelope.SourceGitHub,
 		Actor:       actorRedacted,
-		Resource:    strPtr(resource),
+		Resource:    ptrs.String(resource),
 		Payload:     payload,
 	}
 }
@@ -288,7 +266,7 @@ func (s *Source) normalizeDeployment(repo string, d *gogithub.Deployment, status
 	}
 
 	actor := d.GetCreator().GetLogin()
-	actorRedacted := s.redact.RedactActor(strPtr(actor))
+	actorRedacted := s.redact.RedactActor(ptrs.String(actor))
 
 	resource := fmt.Sprintf("%s/%s@%s", s.cfg.Org, repo, d.GetEnvironment())
 
@@ -309,7 +287,7 @@ func (s *Source) normalizeDeployment(repo string, d *gogithub.Deployment, status
 		EventType:   evType,
 		EventSource: envelope.SourceGitHub,
 		Actor:       actorRedacted,
-		Resource:    strPtr(resource),
+		Resource:    ptrs.String(resource),
 		Payload:     payload,
 	}
 }
@@ -392,7 +370,7 @@ func (s *Source) processPRWebhook(raw map[string]any) error {
 	var actor *string
 	if sender, ok := raw["sender"].(map[string]any); ok {
 		login, _ := sender["login"].(string)
-		actor = s.redact.RedactActor(strPtr(login))
+		actor = s.redact.RedactActor(ptrs.String(login))
 	}
 
 	number, _ := pr["number"].(float64)
@@ -426,7 +404,7 @@ func (s *Source) processPRWebhook(raw map[string]any) error {
 		EventType:   evType,
 		EventSource: envelope.SourceGitHub,
 		Actor:       actor,
-		Resource:    strPtr(resource),
+		Resource:    ptrs.String(resource),
 		Payload:     payload,
 	})
 	return nil
@@ -442,7 +420,7 @@ func (s *Source) processDeploymentWebhook(eventType string, raw map[string]any) 
 	var actor *string
 	if sender, ok := raw["sender"].(map[string]any); ok {
 		login, _ := sender["login"].(string)
-		actor = s.redact.RedactActor(strPtr(login))
+		actor = s.redact.RedactActor(ptrs.String(login))
 	}
 
 	evType := "deploy.started"
@@ -496,7 +474,7 @@ func (s *Source) processDeploymentWebhook(eventType string, raw map[string]any) 
 		EventType:   evType,
 		EventSource: envelope.SourceGitHub,
 		Actor:       actor,
-		Resource:    strPtr(resource),
+		Resource:    ptrs.String(resource),
 		Payload:     payload,
 	})
 	return nil
@@ -510,24 +488,5 @@ func VerifySignature(secret, body []byte, signature string) bool {
 }
 
 func verifyGitHubSignature(secret, body []byte, signature string) bool {
-	const prefix = "sha256="
-	if !strings.HasPrefix(signature, prefix) {
-		return false
-	}
-	hexSig := signature[len(prefix):]
-	sigBytes, err := hex.DecodeString(hexSig)
-	if err != nil {
-		return false
-	}
-	mac := hmac.New(sha256.New, secret)
-	mac.Write(body)
-	expected := mac.Sum(nil)
-	return hmac.Equal(expected, sigBytes)
-}
-
-func strPtr(s string) *string {
-	if s == "" {
-		return nil
-	}
-	return &s
+	return sigverify.HexHMACPrefixed(secret, body, signature, "sha256=")
 }

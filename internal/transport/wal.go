@@ -9,8 +9,11 @@ package transport
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 )
 
 const walExt = ".wal"
@@ -34,13 +37,29 @@ func walWrite(dir, idempotencyKey string, payload []byte) error {
 		return fmt.Errorf("wal marshal: %w", err)
 	}
 	path := filepath.Join(dir, idempotencyKey+walExt)
-	// Write to a temp file then rename for atomicity.
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("wal open tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
 		return fmt.Errorf("wal write tmp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("wal fsync tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("wal close tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return fmt.Errorf("wal rename: %w", err)
+	}
+	// fsync the directory so the rename is durable across crashes.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 	return nil
 }
@@ -50,6 +69,69 @@ func walDelete(dir, idempotencyKey string) error {
 	path := filepath.Join(dir, idempotencyKey+walExt)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("wal delete: %w", err)
+	}
+	return nil
+}
+
+// walPrune removes WAL entries older than maxAge and, if the spool exceeds
+// maxBytes, deletes oldest-first until under cap. A WAL spool that grows
+// without bound is a worse failure mode than dropping ancient batches the
+// ingest API would reject as stale anyway.
+func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("wal prune readdir: %w", err)
+	}
+	type fileInfo struct {
+		path    string
+		size    int64
+		modTime time.Time
+	}
+	var files []fileInfo
+	cutoff := time.Now().Add(-maxAge)
+	for _, de := range entries {
+		if de.IsDir() || filepath.Ext(de.Name()) != walExt {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, de.Name())
+		if maxAge > 0 && info.ModTime().Before(cutoff) {
+			if err := os.Remove(path); err != nil {
+				slog.Warn("wal: prune by age failed", "path", path, "err", err)
+				continue
+			}
+			slog.Info("wal: pruned aged entry", "path", path, "age", time.Since(info.ModTime()))
+			continue
+		}
+		files = append(files, fileInfo{path: path, size: info.Size(), modTime: info.ModTime()})
+	}
+	if maxBytes <= 0 {
+		return nil
+	}
+	var total int64
+	for _, f := range files {
+		total += f.size
+	}
+	if total <= maxBytes {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
+	for _, f := range files {
+		if total <= maxBytes {
+			break
+		}
+		if err := os.Remove(f.path); err != nil {
+			slog.Warn("wal: prune by size failed", "path", f.path, "err", err)
+			continue
+		}
+		slog.Info("wal: pruned oversized spool entry", "path", f.path, "size", f.size)
+		total -= f.size
 	}
 	return nil
 }
@@ -72,11 +154,12 @@ func walRecover(dir string) ([]walEntry, error) {
 		path := filepath.Join(dir, de.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			// Log and skip; do not abort recovery because of one corrupt entry.
+			slog.Warn("wal: skipping unreadable entry", "path", path, "err", err)
 			continue
 		}
 		var entry walEntry
 		if err := json.Unmarshal(data, &entry); err != nil {
+			slog.Warn("wal: skipping corrupt entry", "path", path, "err", err)
 			continue
 		}
 		result = append(result, entry)

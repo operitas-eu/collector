@@ -82,7 +82,11 @@ func (r *Redactor) redactValue(v any) any {
 }
 
 func (r *Redactor) redactString(s string) string {
-	// Replace email addresses.
+	// Cheap pre-check — every leaf string flows through here, but PII requires
+	// either an '@' (email) or a digit (IPv4) or ':' (IPv6).
+	if !strings.ContainsAny(s, "@0123456789:") {
+		return s
+	}
 	s = emailPattern.ReplaceAllStringFunc(s, func(match string) string {
 		return r.sanitize(match)
 	})

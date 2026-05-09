@@ -17,9 +17,6 @@ package pagerduty
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +28,8 @@ import (
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
 	"operitas.eu/collector/internal/redact"
+	internalrt "operitas.eu/collector/internal/runtime"
+	"operitas.eu/collector/internal/sigverify"
 )
 
 // Source listens for PagerDuty webhook v3 payloads.
@@ -49,37 +48,12 @@ func New(cfg config.PagerDutyConfig, r *redact.Redactor, emit func(envelope.Even
 func (s *Source) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/webhook/pagerduty", s.handleWebhook)
-	// Health probe used by the Helm readiness check.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-
 	addr := fmt.Sprintf(":%d", s.cfg.WebhookPort)
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-	}
-
 	slog.Info("pagerduty webhook server starting", "addr", addr)
-
-	errCh := make(chan error, 1)
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
-
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return srv.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		return fmt.Errorf("pagerduty webhook server: %w", err)
-	}
+	return internalrt.RunWebhookServer(ctx, addr, mux)
 }
 
 func (s *Source) handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -126,32 +100,14 @@ type pdMessage struct {
 }
 
 type pdPayload struct {
-	Summary       string    `json:"summary"`
-	Timestamp     string    `json:"timestamp"`
-	Severity      string    `json:"severity"`
-	Source        string    `json:"source"`
-	Component     string    `json:"component"`
-	Group         string    `json:"group"`
-	Class         string    `json:"class"`
-	CustomDetails any       `json:"custom_details"`
-}
-
-// pdIncident is the incident sub-object within a PagerDuty webhook.
-type pdIncident struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	Urgency     string    `json:"urgency"`
-	CreatedAt   string    `json:"created_at"`
-	ResolvedAt  string    `json:"resolved_at"`
-	ServiceName string    `json:"service"`
-	HTMLUrl     string    `json:"html_url"`
-	Assignees   []pdUser  `json:"assignments"`
-}
-
-type pdUser struct {
-	ID      string `json:"id"`
-	Summary string `json:"summary"`
+	Summary       string `json:"summary"`
+	Timestamp     string `json:"timestamp"`
+	Severity      string `json:"severity"`
+	Source        string `json:"source"`
+	Component     string `json:"component"`
+	Group         string `json:"group"`
+	Class         string `json:"class"`
+	CustomDetails any    `json:"custom_details"`
 }
 
 func (s *Source) processPayload(body []byte) error {
@@ -162,7 +118,7 @@ func (s *Source) processPayload(body []byte) error {
 	}
 
 	for _, msg := range webhook.Messages {
-		ev, ok := s.normalizeMessage(msg, body)
+		ev, ok := s.normalizeMessage(msg)
 		if !ok {
 			continue
 		}
@@ -171,22 +127,13 @@ func (s *Source) processPayload(body []byte) error {
 	return nil
 }
 
-func (s *Source) normalizeMessage(msg pdMessage, rawBody []byte) (envelope.Event, bool) {
+func (s *Source) normalizeMessage(msg pdMessage) (envelope.Event, bool) {
 	evType, ok := mapPDEventType(msg.Event)
 	if !ok {
 		slog.Debug("pagerduty: skipping unsupported event type", "pd_event", msg.Event)
 		return envelope.Event{}, false
 	}
 
-	// Parse the incident from the raw body (the go-pagerduty library is not used
-	// to avoid adding a dependency; we parse the incident sub-object directly).
-	var rawMsg map[string]any
-	if err := json.Unmarshal(rawBody, &rawMsg); err != nil {
-		return envelope.Event{}, false
-	}
-
-	// PagerDuty v3: the incident is at messages[0].incident in older formats or
-	// embedded in the payload. We extract what we can from the message payload.
 	t := time.Now().UTC()
 	if msg.CreatedAt != "" {
 		if parsed, err := time.Parse(time.RFC3339, msg.CreatedAt); err == nil {
@@ -231,13 +178,13 @@ func VerifySignature(secret, body []byte, header string) bool {
 
 func mapPDEventType(pdEvent string) (string, bool) {
 	mapping := map[string]string{
-		"incident.triggered":    "incident.opened",
-		"incident.acknowledged": "incident.acknowledged",
-		"incident.resolved":     "incident.resolved",
-		"incident.escalated":    "incident.escalated",
+		"incident.triggered":      "incident.opened",
+		"incident.acknowledged":   "incident.acknowledged",
+		"incident.resolved":       "incident.resolved",
+		"incident.escalated":      "incident.escalated",
 		"incident.unacknowledged": "incident.opened",
-		"incident.delegated":    "incident.escalated",
-		"incident.reopened":     "incident.opened",
+		"incident.delegated":      "incident.escalated",
+		"incident.reopened":       "incident.opened",
 	}
 	t, ok := mapping[pdEvent]
 	return t, ok
@@ -245,26 +192,14 @@ func mapPDEventType(pdEvent string) (string, bool) {
 
 // verifyPDSignature checks the PagerDuty v3 webhook signature.
 // PagerDuty signs using HMAC-SHA256 and sends the value as:
-//   v1=<hex-signature>
+//
+//	v1=<hex-signature>
 //
 // See: https://developer.pagerduty.com/docs/db0fa8c8984fc-verifying-signatures
 func verifyPDSignature(secret, body []byte, signatureHeader string) bool {
 	// The header may contain multiple signatures separated by commas.
 	for _, part := range strings.Split(signatureHeader, ",") {
-		part = strings.TrimSpace(part)
-		const prefix = "v1="
-		if !strings.HasPrefix(part, prefix) {
-			continue
-		}
-		hexSig := part[len(prefix):]
-		sigBytes, err := hex.DecodeString(hexSig)
-		if err != nil {
-			continue
-		}
-		mac := hmac.New(sha256.New, secret)
-		mac.Write(body)
-		expected := mac.Sum(nil)
-		if hmac.Equal(expected, sigBytes) {
+		if sigverify.HexHMACPrefixed(secret, body, strings.TrimSpace(part), "v1=") {
 			return true
 		}
 	}
