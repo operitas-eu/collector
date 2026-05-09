@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
 	"operitas.eu/collector/internal/envelope"
 )
 

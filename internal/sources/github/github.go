@@ -31,6 +31,7 @@ import (
 
 	gogithub "github.com/google/go-github/v63/github"
 	"golang.org/x/oauth2"
+
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
 	"operitas.eu/collector/internal/ptrs"

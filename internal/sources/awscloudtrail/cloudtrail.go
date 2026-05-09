@@ -34,6 +34,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
 	"operitas.eu/collector/internal/ptrs"
