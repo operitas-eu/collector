@@ -75,7 +75,11 @@ jobs:
         run: helm lint helm/collector
 
       - name: helm template (verify default values render cleanly)
-        run: helm template collector helm/collector --debug > /dev/null
+        run: |
+          helm template collector helm/collector --debug \
+            --set tenantId=00000000-0000-0000-0000-000000000000 \
+            --set collectorId=00000000-0000-0000-0000-000000000001 \
+            > /dev/null
 
   # Helm unittest is skipped — no test files present in helm/collector/tests/.
   # Add tests under helm/collector/tests/ and enable helm-unittest plugin here

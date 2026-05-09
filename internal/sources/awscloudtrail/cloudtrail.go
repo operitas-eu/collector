@@ -206,18 +206,18 @@ type cloudTrailLog struct {
 // cloudTrailRecord is the minimal set of fields we read from each CloudTrail record.
 // We do not unmarshal the full record to avoid binding to the full CloudTrail schema.
 type cloudTrailRecord struct {
-	EventTime         string             `json:"eventTime"`
-	EventName         string             `json:"eventName"`
-	EventSource       string             `json:"eventSource"`
-	AWSRegion         string             `json:"awsRegion"`
-	SourceIPAddress   string             `json:"sourceIPAddress"`
-	UserAgent         string             `json:"userAgent"`
-	UserIdentity      ctUserIdentity     `json:"userIdentity"`
-	Resources         []ctResource       `json:"resources"`
-	RequestParameters map[string]any     `json:"requestParameters"`
-	ResponseElements  map[string]any     `json:"responseElements"`
-	ErrorCode         string             `json:"errorCode"`
-	ErrorMessage      string             `json:"errorMessage"`
+	EventTime         string         `json:"eventTime"`
+	EventName         string         `json:"eventName"`
+	EventSource       string         `json:"eventSource"`
+	AWSRegion         string         `json:"awsRegion"`
+	SourceIPAddress   string         `json:"sourceIPAddress"`
+	UserAgent         string         `json:"userAgent"`
+	UserIdentity      ctUserIdentity `json:"userIdentity"`
+	Resources         []ctResource   `json:"resources"`
+	RequestParameters map[string]any `json:"requestParameters"`
+	ResponseElements  map[string]any `json:"responseElements"`
+	ErrorCode         string         `json:"errorCode"`
+	ErrorMessage      string         `json:"errorMessage"`
 }
 
 type ctUserIdentity struct {
@@ -328,4 +328,3 @@ func MapEventType(eventName, eventSource string) string {
 	// Default: treat unknown CloudTrail events as change events.
 	return "change.iac_applied"
 }
-

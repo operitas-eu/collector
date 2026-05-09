@@ -23,20 +23,20 @@ const EnvelopeVersion = "1.0.0"
 type EventSource string
 
 const (
-	SourceAWSCloudTrail  EventSource = "aws.cloudtrail"
+	SourceAWSCloudTrail EventSource = "aws.cloudtrail"
 	// Declared for schema completeness with the JSON envelope. The Azure
 	// collector source package is not yet implemented; the constant exists so
 	// the wire enum stays in lockstep across services. Adding an Azure source
 	// requires a new `internal/sources/azure/` package and the AWS-style
 	// read-only API audit (architectural review 2026-05-07).
-	SourceAzureActivity  EventSource = "azure.activity"
-	SourceGitHub         EventSource = "github"
-	SourcePagerDuty      EventSource = "pagerduty"
-	SourceDatadog        EventSource = "datadog"
-	SourceJira           EventSource = "jira"
-	SourceArgoCD         EventSource = "argocd"
-	SourceK8sAudit       EventSource = "k8s.audit"
-	SourceVendorStatus   EventSource = "vendor.statuspage"
+	SourceAzureActivity EventSource = "azure.activity"
+	SourceGitHub        EventSource = "github"
+	SourcePagerDuty     EventSource = "pagerduty"
+	SourceDatadog       EventSource = "datadog"
+	SourceJira          EventSource = "jira"
+	SourceArgoCD        EventSource = "argocd"
+	SourceK8sAudit      EventSource = "k8s.audit"
+	SourceVendorStatus  EventSource = "vendor.statuspage"
 )
 
 // eventTypePattern matches the pattern from the JSON schema:

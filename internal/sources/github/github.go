@@ -219,16 +219,16 @@ func (s *Source) normalizePR(repo string, pr *gogithub.PullRequest) envelope.Eve
 	actorRedacted := s.redact.RedactActor(ptrs.String(actor))
 
 	payload := map[string]any{
-		"number":     pr.GetNumber(),
-		"title":      pr.GetTitle(),
-		"state":      pr.GetState(),
-		"merged":     pr.GetMerged(),
-		"base_ref":   pr.GetBase().GetRef(),
-		"head_ref":   pr.GetHead().GetRef(),
-		"head_sha":   pr.GetHead().GetSHA(),
-		"repo":       repo,
-		"org":        s.cfg.Org,
-		"html_url":   pr.GetHTMLURL(),
+		"number":   pr.GetNumber(),
+		"title":    pr.GetTitle(),
+		"state":    pr.GetState(),
+		"merged":   pr.GetMerged(),
+		"base_ref": pr.GetBase().GetRef(),
+		"head_ref": pr.GetHead().GetRef(),
+		"head_sha": pr.GetHead().GetSHA(),
+		"repo":     repo,
+		"org":      s.cfg.Org,
+		"html_url": pr.GetHTMLURL(),
 	}
 	payload = s.redact.Apply(payload)
 
@@ -489,4 +489,3 @@ func VerifySignature(secret, body []byte, signature string) bool {
 func verifyGitHubSignature(secret, body []byte, signature string) bool {
 	return sigverify.HexHMACPrefixed(secret, body, signature, "sha256=")
 }
-

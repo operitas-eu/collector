@@ -100,32 +100,14 @@ type pdMessage struct {
 }
 
 type pdPayload struct {
-	Summary       string    `json:"summary"`
-	Timestamp     string    `json:"timestamp"`
-	Severity      string    `json:"severity"`
-	Source        string    `json:"source"`
-	Component     string    `json:"component"`
-	Group         string    `json:"group"`
-	Class         string    `json:"class"`
-	CustomDetails any       `json:"custom_details"`
-}
-
-// pdIncident is the incident sub-object within a PagerDuty webhook.
-type pdIncident struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	Urgency     string    `json:"urgency"`
-	CreatedAt   string    `json:"created_at"`
-	ResolvedAt  string    `json:"resolved_at"`
-	ServiceName string    `json:"service"`
-	HTMLUrl     string    `json:"html_url"`
-	Assignees   []pdUser  `json:"assignments"`
-}
-
-type pdUser struct {
-	ID      string `json:"id"`
-	Summary string `json:"summary"`
+	Summary       string `json:"summary"`
+	Timestamp     string `json:"timestamp"`
+	Severity      string `json:"severity"`
+	Source        string `json:"source"`
+	Component     string `json:"component"`
+	Group         string `json:"group"`
+	Class         string `json:"class"`
+	CustomDetails any    `json:"custom_details"`
 }
 
 func (s *Source) processPayload(body []byte) error {
@@ -196,13 +178,13 @@ func VerifySignature(secret, body []byte, header string) bool {
 
 func mapPDEventType(pdEvent string) (string, bool) {
 	mapping := map[string]string{
-		"incident.triggered":    "incident.opened",
-		"incident.acknowledged": "incident.acknowledged",
-		"incident.resolved":     "incident.resolved",
-		"incident.escalated":    "incident.escalated",
+		"incident.triggered":      "incident.opened",
+		"incident.acknowledged":   "incident.acknowledged",
+		"incident.resolved":       "incident.resolved",
+		"incident.escalated":      "incident.escalated",
 		"incident.unacknowledged": "incident.opened",
-		"incident.delegated":    "incident.escalated",
-		"incident.reopened":     "incident.opened",
+		"incident.delegated":      "incident.escalated",
+		"incident.reopened":       "incident.opened",
 	}
 	t, ok := mapping[pdEvent]
 	return t, ok
@@ -210,7 +192,8 @@ func mapPDEventType(pdEvent string) (string, bool) {
 
 // verifyPDSignature checks the PagerDuty v3 webhook signature.
 // PagerDuty signs using HMAC-SHA256 and sends the value as:
-//   v1=<hex-signature>
+//
+//	v1=<hex-signature>
 //
 // See: https://developer.pagerduty.com/docs/db0fa8c8984fc-verifying-signatures
 func verifyPDSignature(secret, body []byte, signatureHeader string) bool {

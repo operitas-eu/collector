@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"sync"
@@ -232,7 +232,7 @@ func (c *Client) deliverWithRetry(ctx context.Context, idempotencyKey string, pa
 		if delay > c.cfg.BackoffMax {
 			delay = c.cfg.BackoffMax
 		}
-		jitter := time.Duration(float64(delay) * 0.1 * (rand.Float64()*2 - 1))
+		jitter := time.Duration(float64(delay) * 0.1 * (rand.Float64()*2 - 1)) //nolint:gosec // jitter timing is not security-sensitive
 		delay += jitter
 		if delay < 0 {
 			delay = c.cfg.BackoffInitial

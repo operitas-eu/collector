@@ -241,14 +241,14 @@ func populateSecrets(cfg *Config) {
 // euRegions is the set of AWS region names the collector permits for CloudTrail.
 // Non-EU regions are rejected at startup to enforce the EU-only data path.
 var euRegions = map[string]struct{}{
-	"eu-central-1":  {},
-	"eu-central-2":  {},
-	"eu-west-1":     {},
-	"eu-west-2":     {},
-	"eu-west-3":     {},
-	"eu-north-1":    {},
-	"eu-south-1":    {},
-	"eu-south-2":    {},
+	"eu-central-1": {},
+	"eu-central-2": {},
+	"eu-west-1":    {},
+	"eu-west-2":    {},
+	"eu-west-3":    {},
+	"eu-north-1":   {},
+	"eu-south-1":   {},
+	"eu-south-2":   {},
 }
 
 func validate(cfg *Config) error {
