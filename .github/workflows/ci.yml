@@ -46,6 +46,11 @@ jobs:
         run: go vet ./...
 
       - name: go test
+        # Includes the envelope wire-contract test at internal/envelope/envelope_contract_test.go.
+        # That test walks internal/envelope/testdata/fixtures/{valid,invalid}/ and asserts
+        # the collector's validator agrees with the ingest-side validator on every fixture.
+        # Lock-step rule: any fixture change here must land in lock-step with the monorepo
+        # (infra/schemas/fixtures/envelope/) per manifest §0.
         run: go test -race -count=1 -coverprofile=coverage.out ./...
 
       - name: Upload coverage artifact

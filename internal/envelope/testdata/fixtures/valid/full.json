@@ -1,0 +1,74 @@
+{
+  "collector_id": "33333333-3333-3333-3333-333333333333",
+  "tenant_id": "44444444-4444-4444-4444-444444444444",
+  "envelope_version": "1.0.0",
+  "events": [
+    {
+      "occurred_at": "2026-05-07T08:14:02.000000000Z",
+      "event_type": "iam.role.assumed",
+      "event_source": "aws.cloudtrail",
+      "actor": "arn:aws:iam::123456789012:user/alice",
+      "resource": "arn:aws:iam::123456789012:role/deploy",
+      "payload": {"region": "eu-central-1", "request_id": "abc-123"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:03.000000000Z",
+      "event_type": "activity.write",
+      "event_source": "azure.activity",
+      "actor": "alice@example.eu",
+      "resource": "/subscriptions/abc/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/web-1",
+      "payload": {"operation": "Microsoft.Compute/virtualMachines/start/action"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:04.000000000Z",
+      "event_type": "pull_request.merged",
+      "event_source": "github",
+      "actor": "alice",
+      "resource": "operitas-eu/operitas#1234",
+      "payload": {"sha": "deadbeef"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:05.000000000Z",
+      "event_type": "incident.triggered",
+      "event_source": "pagerduty",
+      "actor": null,
+      "resource": "PXXXX",
+      "payload": {"urgency": "high"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:06.000000000Z",
+      "event_type": "monitor.alert",
+      "event_source": "datadog",
+      "payload": {"monitor_id": 42, "state": "Alert"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:07.000000000Z",
+      "event_type": "issue.transitioned",
+      "event_source": "jira",
+      "actor": "alice",
+      "resource": "OPS-123",
+      "payload": {"from": "In Progress", "to": "Done"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:08.000000000Z",
+      "event_type": "deploy.completed",
+      "event_source": "argocd",
+      "payload": {"app": "ingest", "revision": "abc"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:09.000000000Z",
+      "event_type": "pod.deleted",
+      "event_source": "k8s.audit",
+      "actor": "system:serviceaccount:kube-system:replicaset-controller",
+      "resource": "pods/web-1",
+      "payload": {"verb": "delete"}
+    },
+    {
+      "occurred_at": "2026-05-07T08:14:10.000000000Z",
+      "event_type": "component.degraded",
+      "event_source": "vendor.statuspage",
+      "resource": "https://status.example.com",
+      "payload": {"component": "API", "status": "degraded_performance"}
+    }
+  ]
+}

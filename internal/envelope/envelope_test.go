@@ -66,7 +66,7 @@ func TestEventValidate(t *testing.T) {
 				Payload:     map[string]any{},
 			},
 			wantErr: true,
-			errFrag: "event_type",
+			errFrag: "pattern mismatch",
 		},
 		{
 			name: "bad event_type - uppercase",
@@ -77,7 +77,7 @@ func TestEventValidate(t *testing.T) {
 				Payload:     map[string]any{},
 			},
 			wantErr: true,
-			errFrag: "event_type",
+			errFrag: "pattern mismatch",
 		},
 		{
 			name: "unknown event_source",
@@ -88,7 +88,7 @@ func TestEventValidate(t *testing.T) {
 				Payload:     map[string]any{},
 			},
 			wantErr: true,
-			errFrag: "event_source",
+			errFrag: "not in enum",
 		},
 		{
 			name: "nil payload",
@@ -99,7 +99,7 @@ func TestEventValidate(t *testing.T) {
 				Payload:     nil,
 			},
 			wantErr: true,
-			errFrag: "payload",
+			errFrag: "required",
 		},
 	}
 
@@ -154,10 +154,27 @@ func TestValidateBatch(t *testing.T) {
 			errFrag: "envelope_version",
 		},
 		{
+			name: "1001 events — maxItems violation",
+			batch: func() *envelope.BatchRequest {
+				evs := make([]envelope.Event, 1001)
+				for i := range evs {
+					evs[i] = goodEvent
+				}
+				return &envelope.BatchRequest{
+					CollectorID:     "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+					TenantID:        "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
+					EnvelopeVersion: "1.0.0",
+					Events:          evs,
+				}
+			}(),
+			wantErr: true,
+			errFrag: "maxItems",
+		},
+		{
 			name:    "empty events",
 			batch:   &envelope.BatchRequest{CollectorID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890", TenantID: "b1b2c3d4-e5f6-7890-abcd-ef1234567890", EnvelopeVersion: "1.0.0", Events: []envelope.Event{}},
 			wantErr: true,
-			errFrag: "at least 1",
+			errFrag: "minItems",
 		},
 	}
 

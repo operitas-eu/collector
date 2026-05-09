@@ -40,11 +40,36 @@ go build ./cmd/collector
 OPERITAS_CONFIG_FILE=./testdata/config-dev.yaml ./collector
 ```
 
+## Wire contract
+
+The collector ships event envelopes conforming to `evidence_envelope.json` v1.0.0.
+The canonical retry-semantics specification is `docs/api/ingest-batch.md` in the
+[operitas-eu/operitas](https://github.com/operitas-eu/operitas) monorepo (read-only
+link; that repository is not publicly visible). The short version:
+
+| Response | Collector action |
+|---|---|
+| 200 | Advance WAL cursor to `last_seq + 1`; delete WAL entry |
+| 401 / 403 | Stop delivering; surface loud log; operator must rotate key and restart |
+| 413 | Split batch in half and retry each half; single-event 413 goes to DLQ |
+| 422 | Schema validation failure — route to DLQ, never retry |
+| 429 | Honor `Retry-After` header, then retry same batch |
+| 5xx | Exponential backoff with jitter; same `Idempotency-Key` so retry is safe |
+| TLS error | Fail-closed; leave WAL entry for operator investigation |
+
+Both the collector and the ingest service run independent validators against the
+same fixture tree (`internal/envelope/testdata/fixtures/`). Per manifest §0, any
+fixture change must land in both repos in lock-step. If the validators disagree on
+a fixture, that is a P1 wire-contract bug.
+
 ## Testing
 
 ```bash
-go test ./...
+go test -race ./...
 ```
+
+The envelope contract test (`internal/envelope/envelope_contract_test.go`) walks
+the fixture tree and asserts accept/reject outcomes plus error-message substrings.
 
 ## Deploying
 
