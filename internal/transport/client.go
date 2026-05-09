@@ -54,12 +54,16 @@ type Client struct {
 
 // ClientConfig is a subset of the full Config needed by the transport layer.
 type ClientConfig struct {
-	Endpoint           string
-	TLSCertFile        string
-	TLSKeyFile         string
-	TLSCAFile          string
-	CollectorID        string
-	TenantID           string
+	Endpoint    string
+	TLSCertFile string
+	TLSKeyFile  string
+	TLSCAFile   string
+	CollectorID string
+	TenantID    string
+	// APIKey is the bearer token sent in the Authorization header on every request.
+	// Format: <key_id>.<secret> (as minted by the Operitas portal enrollment flow).
+	// This value must never appear in logs, error messages, or any stored state.
+	APIKey             string
 	WALDir             string
 	BatchMaxEvents     int
 	BatchMaxBytes      int
@@ -302,6 +306,10 @@ func (c *Client) deliver(ctx context.Context, idempotencyKey string, payload []b
 		return deliveryTransientError, fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	// Authorization header is set on every attempt (including retries) because
+	// deliver() is called from deliverWithRetry on each attempt. The APIKey
+	// value must never appear in logs or error strings — only in this header.
+	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Idempotency-Key", idempotencyKey)
 	req.Header.Set("X-Collector-ID", c.cfg.CollectorID)
 	req.Header.Set("X-Tenant-ID", c.cfg.TenantID)

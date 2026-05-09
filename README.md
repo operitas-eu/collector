@@ -8,6 +8,162 @@ deploying it to your environment. The wider Operitas platform (ingest pipeline,
 classification agent, ledger, compliance portal) is closed-source SaaS operated
 by ReOps Tech S.R.L. in the EU. Learn more at [operitas.eu](https://operitas.eu).
 
+## Quickstart
+
+### Step 1 — Get credentials
+
+A tenant admin opens the Operitas portal, navigates to
+`https://app.operitas.eu/settings/collectors`, and clicks **New collector**.
+
+The portal shows a one-time credential screen containing three values:
+
+| Field | Description |
+|---|---|
+| `collector_id` | UUID that identifies this collector instance. Embedded in every event envelope. |
+| `api_key` | Bearer token in `<key_id>.<secret>` form. Shown exactly once — save it now. |
+| `ingest_url` | The HTTPS endpoint the collector ships batches to (always an EU-resident host). |
+
+The plaintext `api_key` is never recoverable from the server after this screen
+is closed. If it is lost, mint a new credential and revoke the old one.
+
+### Step 2 — Install
+
+#### Helm (recommended for Kubernetes)
+
+```bash
+# Create the namespace:
+kubectl create namespace operitas --dry-run=client -o yaml | kubectl apply -f -
+
+# 1. Create the API key secret (from the portal enrollment output):
+kubectl create secret generic operitas-collector-api-key \
+  --namespace operitas \
+  --from-literal=OPERITAS_INGEST_API_KEY=<api_key from portal>
+
+# 2. Create the mTLS secret:
+kubectl create secret tls collector-mtls \
+  --namespace operitas \
+  --cert=collector.crt \
+  --key=collector.key
+
+# 3. Create source-credential secrets (only include keys for sources you enable):
+kubectl create secret generic collector-secrets \
+  --namespace operitas \
+  --from-literal=OPERITAS_GITHUB_TOKEN=ghp_... \
+  --from-literal=OPERITAS_GITHUB_WEBHOOK_SECRET=whsec_... \
+  --from-literal=OPERITAS_PD_SIGNING_SECRET=pdsk_...
+
+# 4. Install the chart, referencing the API key secret you just created:
+helm install operitas-collector ./helm/collector \
+  --namespace operitas \
+  --set tenantId=<your-tenant-id> \
+  --set collectorId=<collector_id from portal> \
+  --set ingest.endpoint=<ingest_url from portal> \
+  --set existingApiKeySecret=operitas-collector-api-key \
+  --set sources.cloudtrail.enabled=true \
+  --set sources.cloudtrail.bucketName=my-cloudtrail-bucket \
+  --set sources.cloudtrail.bucketRegion=eu-central-1 \
+  --set sources.github.enabled=true \
+  --set sources.github.org=my-github-org
+```
+
+For development only (value is stored in Helm release history — use the
+`existingApiKeySecret` pattern above for production):
+
+```bash
+helm install operitas-collector ./helm/collector \
+  --namespace operitas \
+  --set tenantId=<your-tenant-id> \
+  --set collectorId=<collector_id from portal> \
+  --set ingest.endpoint=<ingest_url from portal> \
+  --set apiKey=<api_key from portal> \
+  ...
+```
+
+See `helm/collector/README.md` for the full values reference and IAM / GitHub
+App permission requirements.
+
+#### Docker (standalone VMs or local testing)
+
+```bash
+docker run --rm \
+  -e OPERITAS_CONFIG_FILE=/config/config.yaml \
+  -e OPERITAS_INGEST_API_KEY=<api_key from portal> \
+  -v /path/to/your/config.yaml:/config/config.yaml:ro \
+  -v operitas-wal:/var/lib/operitas \
+  ghcr.io/operitas-eu/collector:0.1.0
+```
+
+The config file must contain at minimum:
+
+```yaml
+tenant_id:    "<your-tenant-id>"
+collector_id: "<collector_id from portal>"
+
+ingest:
+  endpoint:      "<ingest_url from portal>"
+  tls_cert_file: "/certs/tls.crt"
+  tls_key_file:  "/certs/tls.key"
+
+sources:
+  cloudtrail:
+    enabled:       true
+    bucket_name:   "my-cloudtrail-bucket"
+    bucket_region: "eu-central-1"
+```
+
+`OPERITAS_INGEST_API_KEY` is a required environment variable — the collector
+will exit at startup with a clear error if it is absent.
+
+Mount your mTLS certificate into `/certs/` and the WAL volume into
+`/var/lib/operitas` (a named volume or host path with appropriate permissions
+for UID 65532).
+
+### Step 3 — Verify
+
+Check the collector logs for a successful startup:
+
+```bash
+# Kubernetes
+kubectl logs -n operitas deploy/operitas-collector
+
+# Docker
+docker logs operitas-collector
+```
+
+On a healthy startup you will see:
+
+```
+{"level":"INFO","msg":"collector starting","version":"0.1.0"}
+{"level":"INFO","msg":"collector running","tenant_id":"...","collector_id":"..."}
+```
+
+Any delivery failure logs at WARN (transient, will retry) or ERROR (permanent).
+A clean log stream with no WARN or ERROR lines means the collector is operating
+correctly.
+
+### Step 4 — Confirm in portal
+
+A tenant admin reloads `https://app.operitas.eu/settings/collectors`. The
+collector row's **Last used** column should show a recent timestamp after the
+first successful batch delivery.
+
+### Step 5 — Rotate or revoke credentials
+
+To rotate: mint a new collector credential in the portal, update the
+`OPERITAS_INGEST_API_KEY` value (Secret or env var), then revoke the old
+credential in the portal.
+
+To revoke: a tenant admin clicks **Revoke** on the collector row. The ingest
+API immediately returns `401` on the next batch attempt. The collector logs:
+
+```
+{"level":"ERROR","msg":"ingest rejected batch (permanent); dropping","status":401}
+```
+
+No further data leaves the environment until new credentials are configured.
+
+---
+
 ## What this collector reads
 
 | Source | What | How |
@@ -37,7 +193,9 @@ cross-event correlation without transmitting raw PII.
 
 ```bash
 go build ./cmd/collector
-OPERITAS_CONFIG_FILE=./testdata/config-dev.yaml ./collector
+OPERITAS_CONFIG_FILE=./testdata/config-dev.yaml \
+  OPERITAS_INGEST_API_KEY=<api_key from portal> \
+  ./collector
 ```
 
 ## Wire contract
@@ -73,7 +231,8 @@ the fixture tree and asserts accept/reject outcomes plus error-message substring
 
 ## Deploying
 
-See `helm/collector/README.md` for the Helm installation guide.
+See `helm/collector/README.md` for the full Helm values reference, IAM policy,
+and GitHub App permissions.
 
 ## Security
 

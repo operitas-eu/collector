@@ -67,12 +67,14 @@ func main() {
 	}
 
 	tcfg := transport.ClientConfig{
-		Endpoint:           cfg.Ingest.Endpoint,
-		TLSCertFile:        cfg.Ingest.TLSCertFile,
-		TLSKeyFile:         cfg.Ingest.TLSKeyFile,
-		TLSCAFile:          cfg.Ingest.TLSCAFile,
-		CollectorID:        cfg.CollectorID,
-		TenantID:           cfg.TenantID,
+		Endpoint:    cfg.Ingest.Endpoint,
+		TLSCertFile: cfg.Ingest.TLSCertFile,
+		TLSKeyFile:  cfg.Ingest.TLSKeyFile,
+		TLSCAFile:   cfg.Ingest.TLSCAFile,
+		CollectorID: cfg.CollectorID,
+		TenantID:    cfg.TenantID,
+		// APIKey is never logged; it is read from OPERITAS_INGEST_API_KEY by config.Load.
+		APIKey:             cfg.Ingest.APIKey,
 		WALDir:             config.WALDir,
 		BatchMaxEvents:     cfg.Ingest.BatchMaxEvents,
 		BatchMaxBytes:      cfg.Ingest.BatchMaxBytes,

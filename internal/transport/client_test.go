@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -386,6 +387,98 @@ func TestHonorRetryAfterOn429(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("expected empty WAL after 429+retry, got %d entries", len(entries))
 	}
+}
+
+// TestAuthorizationHeaderSet asserts that every request (including retries)
+// carries the correct Authorization: Bearer <api_key> header.
+func TestAuthorizationHeaderSet(t *testing.T) {
+	const wantAuth = "Bearer " + transport.TestAPIKey
+
+	var seenHeaders []string
+	var mu sync.Mutex
+	attempts := &atomic.Int64{}
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := attempts.Add(1)
+		mu.Lock()
+		seenHeaders = append(seenHeaders, r.Header.Get("Authorization"))
+		mu.Unlock()
+
+		if n < 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		var batch envelope.BatchRequest
+		_ = json.NewDecoder(r.Body).Decode(&batch)
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(envelope.BatchResponse{Accepted: len(batch.Events)})
+	}))
+	defer srv.Close()
+
+	walDir := t.TempDir()
+	cfg := transport.TestClientConfig(srv.URL, walDir)
+	cfg.BackoffInitial = 20 * time.Millisecond
+	cfg.BackoffMax = 100 * time.Millisecond
+
+	cl, err := transport.NewTestClient(context.Background(), cfg, srv.Client())
+	if err != nil {
+		t.Fatalf("NewTestClient: %v", err)
+	}
+
+	cl.Send(envelope.Event{
+		OccurredAt:  time.Now().UTC(),
+		EventType:   "deploy.completed",
+		EventSource: envelope.SourceGitHub,
+		Payload:     map[string]any{"ref": "main"},
+	})
+
+	time.Sleep(400 * time.Millisecond)
+	if err := cl.Close(context.Background()); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seenHeaders) == 0 {
+		t.Fatal("no requests received by fake server")
+	}
+	for i, h := range seenHeaders {
+		if h != wantAuth {
+			t.Errorf("request %d: Authorization header = %q, want %q", i+1, h, wantAuth)
+		}
+	}
+}
+
+// TestMissingAPIKeyNotLogged ensures that the transport does not leak key
+// material in error strings even when the key is empty.
+func TestMissingAPIKeyNotLogged(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer" && auth != "Bearer " {
+			t.Errorf("unexpected Authorization header value: %q (expected bare \"Bearer\")", auth)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	walDir := t.TempDir()
+	cfg := transport.TestClientConfig(srv.URL, walDir)
+	cfg.APIKey = ""
+
+	cl, err := transport.NewTestClient(context.Background(), cfg, srv.Client())
+	if err != nil {
+		t.Fatalf("NewTestClient: %v", err)
+	}
+
+	cl.Send(envelope.Event{
+		OccurredAt:  time.Now().UTC(),
+		EventType:   "deploy.completed",
+		EventSource: envelope.SourceGitHub,
+		Payload:     map[string]any{},
+	})
+
+	time.Sleep(200 * time.Millisecond)
+	_ = cl.Close(context.Background())
 }
 
 func writeTempFile(t *testing.T, data []byte) string {

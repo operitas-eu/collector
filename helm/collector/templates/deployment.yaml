@@ -35,6 +35,18 @@ spec:
               value: /etc/operitas/config/config.yaml
             - name: LOG_LEVEL
               value: info
+            # Ingest API key — injected as a dedicated env var so it is never
+            # co-mingled with source credentials and is easier to rotate independently.
+            # Precedence: existingApiKeySecret > chart-managed secret (from apiKey value).
+            - name: OPERITAS_INGEST_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.existingApiKeySecret }}
+                  name: {{ .Values.existingApiKeySecret | quote }}
+                  {{- else }}
+                  name: {{ include "collector.fullname" . }}-api-key
+                  {{- end }}
+                  key: OPERITAS_INGEST_API_KEY
 
           # Source credentials from the customer-managed Secret.
           # The Secret must be created before installing the chart.

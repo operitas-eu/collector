@@ -47,6 +47,12 @@ type IngestConfig struct {
 	// Endpoint is the POST /v1/events:batch URL. Must resolve to an EU-resident host.
 	Endpoint string `yaml:"endpoint"`
 
+	// APIKey is the bearer token in <key_id>.<secret> format minted by the Operitas
+	// portal enrollment flow. Required. Delivered via OPERITAS_INGEST_API_KEY; never
+	// stored in YAML or logged. The collector refuses to start if this is empty.
+	// Obtain it from https://app.operitas.eu/settings/collectors (shown once on enrollment).
+	APIKey string `yaml:"-"`
+
 	// TLSCertFile and TLSKeyFile are the mTLS client certificate and private key.
 	// The collector refuses to start if either is absent or cannot be loaded.
 	TLSCertFile string `yaml:"tls_cert_file"`
@@ -226,6 +232,9 @@ func applyDefaults(cfg *Config) {
 }
 
 func populateSecrets(cfg *Config) {
+	if v := os.Getenv("OPERITAS_INGEST_API_KEY"); v != "" {
+		cfg.Ingest.APIKey = v
+	}
 	if v := os.Getenv("OPERITAS_GITHUB_TOKEN"); v != "" {
 		cfg.Sources.GitHub.Token = v
 	}
@@ -261,6 +270,13 @@ func validate(cfg *Config) error {
 	}
 	if cfg.CollectorID == "" {
 		errs = append(errs, errors.New("collector_id is required"))
+	}
+
+	// Bearer token is mandatory — the ingest API rejects every request without it.
+	// Obtain the key from the Operitas portal (https://app.operitas.eu/settings/collectors)
+	// and supply it via the OPERITAS_INGEST_API_KEY environment variable.
+	if cfg.Ingest.APIKey == "" {
+		errs = append(errs, errors.New("OPERITAS_INGEST_API_KEY is required; obtain this from the Operitas portal enrollment flow"))
 	}
 
 	// mTLS is mandatory — hard fail if certificates are missing.

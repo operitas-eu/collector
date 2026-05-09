@@ -77,6 +77,28 @@ ingest:
 tenantId: ""
 collectorId: ""
 
+# apiKey is the bearer token in <key_id>.<secret> format minted by the Operitas
+# portal enrollment flow (https://app.operitas.eu/settings/collectors).
+# MUST be supplied via --set apiKey=... or by referencing an existing Secret.
+#
+# Option A — pass directly (value is stored in Helm release history; use only
+#            for development or when Helm release history is encrypted at rest):
+#   --set apiKey=<key_id>.<secret>
+#
+# Option B — reference an existing Secret (recommended for production):
+#   Set apiKey: "" and set existingApiKeySecret to the name of a Secret whose
+#   OPERITAS_INGEST_API_KEY key holds the plaintext token. The Secret must be
+#   created before installing the chart (e.g. via External Secrets Operator or
+#   kubectl create secret generic).
+#
+# The collector refuses to start if OPERITAS_INGEST_API_KEY is empty.
+apiKey: ""
+
+# existingApiKeySecret: if set, the chart mounts OPERITAS_INGEST_API_KEY from
+# this Secret instead of the one generated from apiKey above.
+# Both apiKey and existingApiKeySecret must not be set simultaneously.
+existingApiKeySecret: ""
+
 # Source configuration. All sources are disabled by default; enable
 # only what the customer has connected.
 sources:

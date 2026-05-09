@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// TestAPIKey is the API key value used in unit tests. It is not a real
+// credential and must never appear in production configuration.
+const TestAPIKey = "testid0000000000.dGVzdHNlY3JldA"
+
 // TestClientConfig returns a ClientConfig suitable for unit tests.
 // It uses the given URL and WAL dir, with fast flush/backoff settings.
 func TestClientConfig(url, walDir string) ClientConfig {
@@ -17,6 +21,7 @@ func TestClientConfig(url, walDir string) ClientConfig {
 		Endpoint:           url,
 		CollectorID:        "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
 		TenantID:           "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
+		APIKey:             TestAPIKey,
 		WALDir:             walDir,
 		BatchMaxEvents:     1000,
 		BatchMaxBytes:      1 * 1024 * 1024,
