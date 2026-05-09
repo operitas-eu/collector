@@ -9,7 +9,7 @@
 #     -t ghcr.io/operitas-eu/collector:$(git describe --tags --always) \
 #     collector/
 
-ARG GO_VERSION=1.23
+ARG GO_VERSION=1.25
 ARG DISTROLESS_TAG=nonroot
 
 # ---- build stage ----
