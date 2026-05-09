@@ -70,7 +70,7 @@ jobs:
             "${{ env.BINARY }}"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -183,7 +183,7 @@ jobs:
           helm push "${{ env.CHART_PKG }}" oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
       - name: Upload chart artifact (for release attachment)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: helm-chart
           path: ${{ env.CHART_PKG }}
