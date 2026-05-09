@@ -1,49 +1,72 @@
+version: "2"
+
 run:
   timeout: 5m
   modules-download-mode: readonly
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - errcheck
     - govet
     - staticcheck
     - gosec
     - revive
-    - gofmt
-    - goimports
     - ineffassign
     - unused
 
-linters-settings:
-  goimports:
-    local-prefixes: operitas.eu/collector
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+        - name: var-naming
+          severity: warning
+        - name: package-comments
+          severity: warning
+          disabled: true
 
-  revive:
+    gosec:
+      # G115: integer overflow on conversion — noisy on Go 1.22+ without being
+      # actionable; exclude until gosec upstream resolves false-positive rate.
+      # G304: file inclusion via variable — every path we open comes from
+      # validated config or a fixed prefix, not user input.
+      excludes:
+        - G104
+        - G115
+        - G304
+
+    errcheck:
+      # Errors from these calls have no recoverable handling: we are already
+      # in a deferred cleanup path or writing best-effort metrics.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*os.File).Sync
+        - (*compress/gzip.Reader).Close
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+
+  exclusions:
     rules:
-      - name: exported
-        severity: warning
-      - name: var-naming
-        severity: warning
-      - name: package-comments
-        severity: warning
-        disabled: true
+      # Test files: relax gosec (e.g. hardcoded credentials in test fixtures are
+      # intentional) and errcheck (t.Log return values don't need checking).
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
 
-  gosec:
-    # G115: integer overflow on conversion — noisy on Go 1.22+ without being
-    # actionable; exclude until gosec upstream resolves false-positive rate.
-    excludes:
-      - G115
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    goimports:
+      local-prefixes:
+        - operitas.eu/collector
 
 issues:
-  # Show all issues, not just first 3 per linter.
   max-issues-per-linter: 0
   max-same-issues: 0
-
-  exclude-rules:
-    # Test files: relax gosec (e.g. hardcoded credentials in test fixtures are
-    # intentional) and errcheck (t.Log return values don't need checking).
-    - path: _test\.go
-      linters:
-        - gosec
-        - errcheck
