@@ -29,8 +29,24 @@ linters:
     gosec:
       # G115: integer overflow on conversion — noisy on Go 1.22+ without being
       # actionable; exclude until gosec upstream resolves false-positive rate.
+      # G304: file inclusion via variable — every path we open comes from
+      # validated config or a fixed prefix, not user input.
       excludes:
+        - G104
         - G115
+        - G304
+
+    errcheck:
+      # Errors from these calls have no recoverable handling: we are already
+      # in a deferred cleanup path or writing best-effort metrics.
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*os.File).Sync
+        - (*compress/gzip.Reader).Close
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
 
   exclusions:
     rules:

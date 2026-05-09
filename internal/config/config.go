@@ -16,6 +16,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Filesystem paths owned by the collector. All persistent state must live
+// under DataDir (manifest hard failure rule 3).
 const (
 	DefaultConfigPath = "/var/lib/operitas/config.yaml"
 	DataDir           = "/var/lib/operitas"
