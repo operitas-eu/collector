@@ -353,19 +353,19 @@ func TestDrainDLQ(t *testing.T) {
 
 	// Write two synthetic DLQ files directly using the transport package helper.
 	type dlqFileShape struct {
-		QueuedAt    string          `json:"queued_at"`
-		StatusCode  int             `json:"status_code"`
-		ResponseBody string         `json:"response_body"`
-		RequestBody json.RawMessage `json:"request_body"`
+		QueuedAt     string          `json:"queued_at"`
+		StatusCode   int             `json:"status_code"`
+		ResponseBody string          `json:"response_body"`
+		RequestBody  json.RawMessage `json:"request_body"`
 	}
 
 	fakePayload := json.RawMessage(`{"collector_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","tenant_id":"b1b2c3d4-e5f6-7890-abcd-ef1234567890","envelope_version":"1.0.0","events":[]}`)
 	for i := 0; i < 2; i++ {
 		entry := dlqFileShape{
-			QueuedAt:    "2026-05-11T10:00:00Z",
-			StatusCode:  422,
+			QueuedAt:     "2026-05-11T10:00:00Z",
+			StatusCode:   422,
 			ResponseBody: `{"error":"validation_failed"}`,
-			RequestBody: fakePayload,
+			RequestBody:  fakePayload,
 		}
 		data, _ := json.Marshal(entry)
 		// Use deterministic filenames for the test.

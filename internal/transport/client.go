@@ -28,13 +28,6 @@ import (
 // by the ingest API and will not be retried automatically.
 var ErrBatchDLQed = fmt.Errorf("batch was routed to DLQ (schema validation failure or oversized single event)")
 
-// idempotencyKeyTTL is the collector-side retry deadline for a batch. It must
-// be shorter than the server's idempotency cache TTL (24h per
-// internal/idempotency/redis.go in the operitas-eu/operitas monorepo) so that
-// a replayed Idempotency-Key always hits the cache and never double-writes.
-// 12h is well within the 24h server window and also within the WAL prune age (14 days).
-const idempotencyKeyTTL = 12 * time.Hour
-
 // Client batches events, persists them to the WAL, and ships them to the
 // ingest API with mTLS and exponential backoff.
 //

@@ -31,8 +31,8 @@ var newUUID = func() (string, error) {
 }
 
 const (
-	dlqExt    = ".dlq"
-	dlqMaxAge = 14 * 24 * time.Hour
+	dlqExt            = ".dlq"
+	dlqMaxAge         = 14 * 24 * time.Hour
 	dlqMaxBytes int64 = 1 << 30 // 1 GiB
 )
 
