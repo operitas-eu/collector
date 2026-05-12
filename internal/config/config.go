@@ -22,6 +22,7 @@ const (
 	DefaultConfigPath = "/var/lib/operitas/config.yaml"
 	DataDir           = "/var/lib/operitas"
 	WALDir            = "/var/lib/operitas/wal"
+	DLQDir            = "/var/lib/operitas/dlq"
 
 	// defaultEndpoint is a placeholder; operators must set ingest.endpoint explicitly.
 	// It deliberately has no default that could accidentally route data to a US region.

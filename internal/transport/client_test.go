@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -282,10 +284,144 @@ func TestDLQOn422(t *testing.T) {
 	if got := received.Load(); got != 1 {
 		t.Errorf("expected exactly 1 attempt on 422 (no retry), got %d", got)
 	}
-	// WAL entry must be deleted after DLQ routing.
-	entries, _ := os.ReadDir(walDir)
-	if len(entries) != 0 {
-		t.Errorf("expected empty WAL after 422 DLQ routing, got %d entries", len(entries))
+	// WAL directory entries must not include any .wal files (the DLQ subdir
+	// may be present, so we filter to .wal only).
+	walEntries, _ := os.ReadDir(walDir)
+	var walFiles []string
+	for _, e := range walEntries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".wal") {
+			walFiles = append(walFiles, e.Name())
+		}
+	}
+	if len(walFiles) != 0 {
+		t.Errorf("expected empty WAL after 422 DLQ routing, got entries: %v", walFiles)
+	}
+
+	// A DLQ file must have been written under cfg.DLQDir.
+	dlqDir := cfg.DLQDir
+	dlqEntries, err := os.ReadDir(dlqDir)
+	if err != nil {
+		t.Fatalf("ReadDir DLQ dir %q: %v", dlqDir, err)
+	}
+	var dlqFiles []string
+	for _, e := range dlqEntries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".dlq") {
+			dlqFiles = append(dlqFiles, e.Name())
+		}
+	}
+	if len(dlqFiles) != 1 {
+		t.Fatalf("expected exactly 1 DLQ file after 422, got %d: %v", len(dlqFiles), dlqFiles)
+	}
+
+	// Verify DLQ file content structure.
+	raw, err := os.ReadFile(filepath.Join(dlqDir, dlqFiles[0]))
+	if err != nil {
+		t.Fatalf("read DLQ file: %v", err)
+	}
+	var dlq struct {
+		QueuedAt    string          `json:"queued_at"`
+		StatusCode  int             `json:"status_code"`
+		RequestBody json.RawMessage `json:"request_body"`
+	}
+	if err := json.Unmarshal(raw, &dlq); err != nil {
+		t.Fatalf("unmarshal DLQ file: %v", err)
+	}
+	if dlq.StatusCode != 422 {
+		t.Errorf("DLQ file status_code = %d, want 422", dlq.StatusCode)
+	}
+	if dlq.QueuedAt == "" {
+		t.Error("DLQ file queued_at is empty")
+	}
+	if len(dlq.RequestBody) == 0 {
+		t.Error("DLQ file request_body is empty")
+	}
+}
+
+// TestDrainDLQ verifies that --drain-dlq moves DLQ entries into the WAL with
+// fresh idempotency keys and removes the DLQ files.
+func TestDrainDLQ(t *testing.T) {
+	baseDir := t.TempDir()
+	dlqDir := filepath.Join(baseDir, "dlq")
+	walDir := filepath.Join(baseDir, "wal")
+
+	if err := os.MkdirAll(dlqDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(walDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write two synthetic DLQ files directly using the transport package helper.
+	type dlqFileShape struct {
+		QueuedAt    string          `json:"queued_at"`
+		StatusCode  int             `json:"status_code"`
+		ResponseBody string         `json:"response_body"`
+		RequestBody json.RawMessage `json:"request_body"`
+	}
+
+	fakePayload := json.RawMessage(`{"collector_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","tenant_id":"b1b2c3d4-e5f6-7890-abcd-ef1234567890","envelope_version":"1.0.0","events":[]}`)
+	for i := 0; i < 2; i++ {
+		entry := dlqFileShape{
+			QueuedAt:    "2026-05-11T10:00:00Z",
+			StatusCode:  422,
+			ResponseBody: `{"error":"validation_failed"}`,
+			RequestBody: fakePayload,
+		}
+		data, _ := json.Marshal(entry)
+		// Use deterministic filenames for the test.
+		name := filepath.Join(dlqDir, "2026-05-11T10-00-00.000000000Z-00000000-0000-0000-0000-00000000000"+string(rune('0'+i))+".dlq")
+		if err := os.WriteFile(name, data, 0o600); err != nil {
+			t.Fatalf("write dlq fixture %d: %v", i, err)
+		}
+	}
+
+	if err := transport.DrainDLQ(dlqDir, walDir); err != nil {
+		t.Fatalf("DrainDLQ: %v", err)
+	}
+
+	// DLQ directory must be empty after drain.
+	dlqEntries, _ := os.ReadDir(dlqDir)
+	var remaining []string
+	for _, e := range dlqEntries {
+		if strings.HasSuffix(e.Name(), ".dlq") {
+			remaining = append(remaining, e.Name())
+		}
+	}
+	if len(remaining) != 0 {
+		t.Errorf("expected DLQ dir empty after drain, got: %v", remaining)
+	}
+
+	// WAL directory must contain exactly 2 new .wal files.
+	walEntries, _ := os.ReadDir(walDir)
+	var walFiles []string
+	for _, e := range walEntries {
+		if strings.HasSuffix(e.Name(), ".wal") {
+			walFiles = append(walFiles, e.Name())
+		}
+	}
+	if len(walFiles) != 2 {
+		t.Errorf("expected 2 WAL files after drain, got %d: %v", len(walFiles), walFiles)
+	}
+
+	// Each WAL file must contain a valid walEntry with non-empty payload.
+	for _, name := range walFiles {
+		raw, err := os.ReadFile(filepath.Join(walDir, name))
+		if err != nil {
+			t.Fatalf("read wal file %s: %v", name, err)
+		}
+		var entry struct {
+			IdempotencyKey string          `json:"idempotency_key"`
+			Payload        json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(raw, &entry); err != nil {
+			t.Fatalf("unmarshal wal file %s: %v", name, err)
+		}
+		if entry.IdempotencyKey == "" {
+			t.Errorf("wal file %s: empty idempotency_key", name)
+		}
+		if len(entry.Payload) == 0 {
+			t.Errorf("wal file %s: empty payload", name)
+		}
 	}
 }
 

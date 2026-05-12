@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -39,10 +40,31 @@ import (
 var version = "dev"
 
 func main() {
+	// --drain-dlq: replay all DLQ entries back into the WAL with fresh
+	// idempotency keys and exit. Run this after fixing a schema mismatch on
+	// the ingest side. The flag is parsed before config so operators can run
+	// it without a fully valid config (e.g. in an init container).
+	drainDLQ := flag.Bool("drain-dlq", false,
+		"replay all DLQ files from /var/lib/operitas/dlq/ into the WAL and exit")
+	flag.Parse()
+
 	// Structured JSON logs to stdout only. Never write logs to disk.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slogLevel(),
 	})))
+
+	if *drainDLQ {
+		slog.Info("drain-dlq mode: replaying DLQ entries into WAL",
+			"dlq_dir", config.DLQDir,
+			"wal_dir", config.WALDir,
+		)
+		if err := transport.DrainDLQ(config.DLQDir, config.WALDir); err != nil {
+			slog.Error("drain-dlq failed", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("drain-dlq complete")
+		os.Exit(0)
+	}
 
 	slog.Info("collector starting", "version", version)
 
@@ -76,6 +98,7 @@ func main() {
 		// APIKey is never logged; it is read from OPERITAS_INGEST_API_KEY by config.Load.
 		APIKey:             cfg.Ingest.APIKey,
 		WALDir:             config.WALDir,
+		DLQDir:             config.DLQDir,
 		BatchMaxEvents:     cfg.Ingest.BatchMaxEvents,
 		BatchMaxBytes:      cfg.Ingest.BatchMaxBytes,
 		BatchFlushInterval: cfg.Ingest.BatchFlushInterval,
@@ -203,9 +226,9 @@ func slogLevel() slog.Level {
 
 // metricsHandler serves minimal Prometheus text-format metrics.
 // The prometheus/client_golang library is not yet an approved dependency
-// (manifest §0 rule 2). This stub satisfies the NetworkPolicy template
-// and the Helm readiness probe; a proper metrics integration is tracked as
-// a follow-up once the library is approved.
+// (manifest §0 rule 2). Counters are maintained in-memory by the transport
+// package and formatted here. A proper client_golang integration is tracked
+// as a follow-up once the library is approved.
 func metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	fmt.Fprintf(w, "# HELP operitas_collector_up 1 if the collector is running.\n")
@@ -214,6 +237,7 @@ func metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "# HELP operitas_collector_build_info Build version label.\n")
 	fmt.Fprintf(w, "# TYPE operitas_collector_build_info gauge\n")
 	fmt.Fprintf(w, "operitas_collector_build_info{version=%q} 1\n", version)
+	transport.WriteDLQMetrics(w)
 }
 
 func healthzHandler(w http.ResponseWriter, _ *http.Request) {

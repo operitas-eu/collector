@@ -65,6 +65,7 @@ type ClientConfig struct {
 	// This value must never appear in logs, error messages, or any stored state.
 	APIKey             string
 	WALDir             string
+	DLQDir             string
 	BatchMaxEvents     int
 	BatchMaxBytes      int
 	BatchFlushInterval time.Duration
@@ -100,6 +101,10 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 	// Drop stale or oversized WAL entries before replaying.
 	if err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
 		slog.Warn("wal prune failed", "err", err)
+	}
+	// Prune DLQ with identical policy: 14-day age + 1 GiB cap.
+	if err := dlqPrune(cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
+		slog.Warn("dlq prune failed", "err", err)
 	}
 
 	if err := c.replayWAL(ctx); err != nil {
@@ -350,7 +355,7 @@ func (c *Client) deliver(ctx context.Context, idempotencyKey string, payload []b
 
 	case http.StatusUnprocessableEntity:
 		// 422: schema validation failure — route to DLQ, never retry.
-		return c.handle422(resp, idempotencyKey)
+		return c.handle422(resp, idempotencyKey, payload)
 
 	case http.StatusTooManyRequests:
 		// 429: honor Retry-After header then signal the caller to retry.
@@ -426,13 +431,15 @@ func (c *Client) handleOK(resp *http.Response, idempotencyKey string, eventCount
 
 // handle422 logs the per-event errors from the 422 body (metadata only, no
 // payload content per manifest §12.13) and routes the batch to the DLQ.
-func (c *Client) handle422(resp *http.Response, idempotencyKey string) (deliveryOutcome, error) {
+// requestBody is the serialised BatchRequest that was sent; it is written to
+// the DLQ file (already PII-redacted). It must NOT appear in log lines.
+func (c *Client) handle422(resp *http.Response, idempotencyKey string, requestBody []byte) (deliveryOutcome, error) {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	var ve envelope.ValidationError422
+	eventCount := 0
 	if err := json.Unmarshal(body, &ve); err != nil {
 		slog.Warn("422 response: failed to decode error body",
 			"idempotency_key", idempotencyKey,
-			"raw", string(body),
 		)
 	} else {
 		if len(ve.EnvelopeErrors) > 0 {
@@ -442,21 +449,52 @@ func (c *Client) handle422(resp *http.Response, idempotencyKey string) (delivery
 			)
 		}
 		for _, ev := range ve.Events {
-			// Log event_type and event_source are not in the 422 body (server only
-			// echoes index + error strings). Log index + errors only; no payload.
+			// event_type and event_source are not echoed by the server; log
+			// index + error strings only. No payload content in logs.
 			slog.Warn("422 per-event validation error — routing to DLQ",
 				"idempotency_key", idempotencyKey,
 				"event_index", ev.Index,
 				"errors", ev.Errors,
 			)
+			eventCount++
 		}
 	}
-	slog.Error("batch failed schema validation (422): routing to DLQ — do not retry; check for schema drift between collector and ingest validators (manifest §0 P1)",
+
+	dlqPath := c.writeToDLQ(idempotencyKey, http.StatusUnprocessableEntity, body, requestBody, eventCount)
+	slog.Warn("batch failed schema validation (422): routed to DLQ — do not retry; check for schema drift between collector and ingest validators (manifest §0 P1)",
 		"idempotency_key", idempotencyKey,
+		"dlq_path", dlqPath,
+		"status_code", http.StatusUnprocessableEntity,
+		"event_count", eventCount,
 	)
-	// TODO: write to a DLQ file under /var/lib/operitas/dlq/ when DLQ is implemented.
-	// For now we delete the WAL entry (the batch is poison and cannot be fixed by retry).
 	return deliveryDLQ, nil
+}
+
+// writeToDLQ writes the failed batch to the DLQ directory and increments the
+// per-status-code metric counter. It returns the full path of the written file
+// (or an empty string if the write failed, in which case an error is logged).
+//
+// responseBody may be nil (e.g. for a 413 where the body is not meaningful).
+// requestBody is the serialised BatchRequest — already PII-redacted — and must
+// not be included in any log line. Its content goes only into the DLQ file.
+func (c *Client) writeToDLQ(idempotencyKey string, statusCode int, responseBody []byte, requestBody []byte, eventCount int) string {
+	// Truncate response body to 64 KiB before writing to the DLQ file.
+	const maxRespBody = 1 << 16
+	if len(responseBody) > maxRespBody {
+		responseBody = responseBody[:maxRespBody]
+	}
+	path, err := dlqWrite(c.cfg.DLQDir, idempotencyKey, statusCode, responseBody, requestBody)
+	if err != nil {
+		slog.Error("dlq write failed; batch permanently dropped",
+			"idempotency_key", idempotencyKey,
+			"status_code", statusCode,
+			"event_count", eventCount,
+			"err", err,
+		)
+		return ""
+	}
+	incDLQCounter(statusCode)
+	return path
 }
 
 // handle429 reads the Retry-After header and sleeps for that duration before
@@ -490,11 +528,14 @@ func (c *Client) handle429(ctx context.Context, resp *http.Response) (deliveryOu
 // structurally different payload.
 func (c *Client) deliverSplit(ctx context.Context, originalKey string, payload []byte, eventCount int) (deliveryOutcome, error) {
 	if eventCount <= 1 {
-		// A single event that exceeds 32 MiB is pathological. DLQ it.
-		slog.Error("single-event batch returned 413 — event exceeds server size limit; routing to DLQ",
-			"original_idempotency_key", originalKey,
+		// A single event that exceeds the server size limit is pathological. DLQ it.
+		dlqPath := c.writeToDLQ(originalKey, http.StatusRequestEntityTooLarge, nil, payload, eventCount)
+		slog.Warn("single-event batch returned 413 — event exceeds server size limit; routed to DLQ",
+			"idempotency_key", originalKey,
+			"dlq_path", dlqPath,
+			"status_code", http.StatusRequestEntityTooLarge,
+			"event_count", eventCount,
 		)
-		// TODO: write to DLQ file.
 		return deliveryDLQ, nil
 	}
 

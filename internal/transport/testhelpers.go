@@ -16,6 +16,8 @@ const TestAPIKey = "testid0000000000.dGVzdHNlY3JldA"
 
 // TestClientConfig returns a ClientConfig suitable for unit tests.
 // It uses the given URL and WAL dir, with fast flush/backoff settings.
+// The DLQDir is set to walDir + "/dlq" so tests can inspect DLQ files
+// without needing a separate directory argument.
 func TestClientConfig(url, walDir string) ClientConfig {
 	return ClientConfig{
 		Endpoint:           url,
@@ -23,6 +25,7 @@ func TestClientConfig(url, walDir string) ClientConfig {
 		TenantID:           "b1b2c3d4-e5f6-7890-abcd-ef1234567890",
 		APIKey:             TestAPIKey,
 		WALDir:             walDir,
+		DLQDir:             walDir + "/dlq",
 		BatchMaxEvents:     1000,
 		BatchMaxBytes:      1 * 1024 * 1024,
 		BatchFlushInterval: 100 * time.Millisecond,

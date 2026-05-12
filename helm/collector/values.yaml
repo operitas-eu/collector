@@ -38,13 +38,16 @@ containerSecurityContext:
     drop:
       - ALL
 
-# Persistent volume for the WAL spool. The collector writes to /var/lib/operitas/wal/
-# and must survive pod restarts without losing undelivered events.
+# Persistent volume for the WAL spool and DLQ. The collector writes to
+# /var/lib/operitas/wal/ (WAL, up to 1 GiB) and /var/lib/operitas/dlq/
+# (dead-letter queue, up to 1 GiB). Both directories live under the same
+# PVC mount at /var/lib/operitas. The default 2 GiB provides headroom for
+# both; operators with high event volumes may increase this value.
 persistence:
   enabled: true
   storageClass: ""
   accessMode: ReadWriteOnce
-  size: 1Gi
+  size: 2Gi
 
 # Resource limits. The collector is designed to stay under 64 MB RSS at steady state.
 resources:
