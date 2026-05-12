@@ -82,13 +82,14 @@ jobs:
 
   security-scan:
     name: Trivy FS scan
-    # Advisory: a failure here logs the SARIF and any CRITICAL/HIGH findings
-    # but does NOT block the GitHub Release publish. The release job's `needs`
-    # was decoupled because the SARIF upload requires repo workflow-permissions
-    # set to read-and-write, which is a repo Settings-level concern outside
-    # this YAML. Re-couple by adding `security-scan` back into the Create
-    # GitHub release job's `needs` list once that setting is in place.
-    continue-on-error: true
+    # Blocking: a CRITICAL or HIGH finding (exit-code: "1" on the trivy step
+    # below) fails the job and stops the GitHub Release from being created.
+    # SARIF is uploaded to the Security tab using security-events: write
+    # granted at the workflow level — depends on the org-level "Read and
+    # write permissions" setting at github.com/organizations/operitas-eu/
+    # settings/actions. If that org setting is ever reverted to read-only,
+    # this job will fail at "Set up job" and block all future releases until
+    # the org setting is restored.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -199,10 +200,7 @@ jobs:
 
   create-release:
     name: Create GitHub release
-    # security-scan intentionally decoupled — see its job comment. CRITICAL
-    # findings still surface in the Trivy job's logs and (when permissions
-    # allow) in the Security tab; they don't gate the release page itself.
-    needs: [build-binaries, build-image, package-helm]
+    needs: [build-binaries, security-scan, build-image, package-helm]
     runs-on: ubuntu-24.04
     steps:
       - name: Download all build artifacts
