@@ -101,7 +101,7 @@ jobs:
         # and produces the cosign-signed artefacts. Pushing again from CI
         # would either duplicate (with weaker provenance) or fail with 403
         # — historically the second.
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
