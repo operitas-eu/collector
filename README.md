@@ -164,6 +164,92 @@ No further data leaves the environment until new credentials are configured.
 
 ---
 
+## Wire-contract test mode
+
+Use `--emit-event` to push a single synthetic event from any test box directly
+to the production control plane. This exercises the full transport stack — WAL
+write, envelope validation, idempotency key generation, mTLS (or plain TLS),
+retry/backoff, DLQ — without running a long-lived collector. It is the
+recommended way to validate the wire contract after an enrollment or after a
+collector upgrade.
+
+### Required environment variables
+
+| Variable | Description |
+|---|---|
+| `OPERITAS_INGEST_API_KEY` | Bearer token from the portal enrollment screen |
+| `OPERITAS_INGEST_URL` | Ingest endpoint (defaults to `https://api.operitas.eu/v1/events:batch`) |
+| `OPERITAS_COLLECTOR_ID` | Collector UUID from the portal (optional; a fresh UUID is generated if absent) |
+
+### Flag reference
+
+```
+--emit-event
+    --tenant-id    <uuid>        Tenant UUID (required)
+    --event-type   <string>      Event type in lower.dot.notation, e.g. vendor.outage (required)
+    --event-source <string>      Event source enum, e.g. aws.cloudtrail (required)
+    [--actor       <string>]     IAM principal, user, or bot name
+    [--resource    <string>]     Affected resource identifier (ARN, repo path, service name…)
+    [--payload-file <path>]      Path to a JSON object file; defaults to {}
+```
+
+`event-source` must be one of the enum values in the evidence envelope schema:
+`aws.cloudtrail`, `azure.activity`, `github`, `pagerduty`, `datadog`, `jira`,
+`argocd`, `k8s.audit`, `vendor.statuspage`.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Ingest API returned 200 — event accepted |
+| `1` | Delivery failed (4xx/5xx, TLS error, or DLQ routing on 422) |
+| `2` | Bad flag syntax or missing required flag |
+
+A 422 response means the envelope failed server-side schema validation and was
+written to the DLQ (under `/var/lib/operitas/dlq/` in the container). This is a
+wire-contract bug — the collector and ingest validators disagree. Check for
+schema drift (manifest §0 P1).
+
+### Docker example
+
+```bash
+docker run --rm \
+  -e OPERITAS_INGEST_API_KEY=<api_key from portal> \
+  -e OPERITAS_INGEST_URL=https://api.operitas.eu/v1/events:batch \
+  -e OPERITAS_COLLECTOR_ID=<collector_id from portal> \
+  ghcr.io/operitas-eu/collector:latest \
+  --emit-event \
+    --tenant-id <your-tenant-uuid> \
+    --event-type vendor.outage \
+    --event-source aws.cloudtrail
+```
+
+With an optional payload file:
+
+```bash
+docker run --rm \
+  -e OPERITAS_INGEST_API_KEY=<api_key from portal> \
+  -e OPERITAS_INGEST_URL=https://api.operitas.eu/v1/events:batch \
+  -v /path/to/payload.json:/tmp/payload.json:ro \
+  ghcr.io/operitas-eu/collector:latest \
+  --emit-event \
+    --tenant-id <your-tenant-uuid> \
+    --event-type vendor.outage \
+    --event-source aws.cloudtrail \
+    --actor "ops-bot" \
+    --resource "arn:aws:s3:::my-trail-bucket" \
+    --payload-file /tmp/payload.json
+```
+
+On success the structured log will include:
+
+```json
+{"level":"INFO","msg":"emit_event_start","tenant_id":"...","event_type":"vendor.outage","event_source":"aws.cloudtrail","endpoint":"https://api.operitas.eu/v1/events:batch"}
+{"level":"INFO","msg":"emit_event_sent","tenant_id":"...","event_type":"vendor.outage","event_source":"aws.cloudtrail","endpoint":"https://api.operitas.eu/v1/events:batch"}
+```
+
+---
+
 ## What this collector reads
 
 | Source | What | How |

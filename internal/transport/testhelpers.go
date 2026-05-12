@@ -50,3 +50,16 @@ func NewTestClient(ctx context.Context, cfg ClientConfig, httpClient *http.Clien
 	go c.flushLoop(ctx)
 	return c, nil
 }
+
+// NewTestClientNoMTLS creates a Client that uses the provided http.Client and
+// does NOT start the background flush loop. Intended for tests that call
+// SendOnce directly (one-shot --emit-event style tests).
+func NewTestClientNoMTLS(httpClient *http.Client, cfg ClientConfig) (*Client, error) {
+	c := &Client{
+		cfg:     cfg,
+		httpCl:  httpClient,
+		flushCh: make(chan struct{}, 1),
+		done:    make(chan struct{}),
+	}
+	return c, nil
+}

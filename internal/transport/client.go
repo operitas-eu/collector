@@ -23,6 +23,11 @@ import (
 	"operitas.eu/collector/internal/envelope"
 )
 
+// ErrBatchDLQed is returned by FlushOnce when the event was routed to the
+// dead-letter queue (HTTP 422 or single-event 413). The event was not accepted
+// by the ingest API and will not be retried automatically.
+var ErrBatchDLQed = fmt.Errorf("batch was routed to DLQ (schema validation failure or oversized single event)")
+
 // idempotencyKeyTTL is the collector-side retry deadline for a batch. It must
 // be shorter than the server's idempotency cache TTL (24h per
 // internal/idempotency/redis.go in the operitas-eu/operitas monorepo) so that
@@ -160,6 +165,88 @@ func (c *Client) Close(ctx context.Context) error {
 	c.wg.Wait()
 	// Final flush of anything remaining in the buffer.
 	return c.flush(ctx)
+}
+
+// SendOnce builds a single-event batch from ev, writes it to the WAL, delivers
+// it to the ingest API with full retry/backoff semantics, then returns:
+//   - nil on HTTP 200
+//   - ErrBatchDLQed on 422 or single-event 413 (event written to DLQ)
+//   - a descriptive error for 401/403 or unrecoverable transport failure
+//
+// The WAL entry is deleted on deliveryOK or deliveryDLQ so a subsequent normal
+// collector run does not replay the same event. On any other outcome the WAL
+// entry is left in place for operator investigation.
+//
+// SendOnce is intended for one-shot CLI modes such as --emit-event. It does not
+// interact with the background flush loop; callers should use NewClientNoMTLS
+// (which does not start the loop) rather than NewClient.
+func (c *Client) SendOnce(ctx context.Context, ev envelope.Event) error {
+	batch := envelope.NewBatch(c.cfg.CollectorID, c.cfg.TenantID, []envelope.Event{ev})
+	if err := envelope.ValidateBatch(batch); err != nil {
+		return fmt.Errorf("envelope validation failed: %w", err)
+	}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		return fmt.Errorf("marshal batch: %w", err)
+	}
+	idempotencyKey := uuid.NewString()
+	if err := walWrite(c.cfg.WALDir, idempotencyKey, payload); err != nil {
+		// Non-fatal: proceed with delivery even if the WAL write failed.
+		slog.Error("emit-event: wal write failed; event not durably spooled", "err", err)
+	}
+	outcome, err := c.deliverWithRetry(ctx, idempotencyKey, payload, 1)
+	if err != nil {
+		return fmt.Errorf("delivery failed: %w", err)
+	}
+	switch outcome {
+	case deliveryOK:
+		_ = walDelete(c.cfg.WALDir, idempotencyKey)
+		return nil
+	case deliveryDLQ:
+		_ = walDelete(c.cfg.WALDir, idempotencyKey)
+		return ErrBatchDLQed
+	case deliveryDeauthorized:
+		return fmt.Errorf("collector deauthorized: ingest returned 401/403 — check API key and tenant configuration")
+	default:
+		return fmt.Errorf("delivery ended in unexpected outcome %d", outcome)
+	}
+}
+
+// NewClientNoMTLS builds a Client that uses plain HTTPS with the system CA pool
+// (no mTLS client certificate). This is the transport used by the --emit-event
+// one-shot mode when no client certificate is configured. All other transport
+// behaviour (WAL, DLQ, backoff, retry semantics) is identical to NewClient.
+//
+// The background flush loop is NOT started; callers should use SendOnce for
+// one-shot delivery.
+func NewClientNoMTLS(cfg ClientConfig) (*Client, error) {
+	httpCl := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion: tls.VersionTLS13,
+			},
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+		},
+		Timeout: 60 * time.Second,
+	}
+
+	c := &Client{
+		cfg:     cfg,
+		httpCl:  httpCl,
+		flushCh: make(chan struct{}, 1),
+		done:    make(chan struct{}),
+	}
+
+	if err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
+		slog.Warn("wal prune failed", "err", err)
+	}
+	if err := dlqPrune(cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
+		slog.Warn("dlq prune failed", "err", err)
+	}
+
+	return c, nil
 }
 
 func (c *Client) flushLoop(ctx context.Context) {

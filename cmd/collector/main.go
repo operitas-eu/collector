@@ -44,8 +44,16 @@ func main() {
 	// idempotency keys and exit. Run this after fixing a schema mismatch on
 	// the ingest side. The flag is parsed before config so operators can run
 	// it without a fully valid config (e.g. in an init container).
+	//
+	// --emit-event: build one synthetic envelope from the supplied sub-flags and
+	// ship it via the transport client, then exit. Used to validate the wire
+	// contract against the production control plane without running a full
+	// collector. Config comes from env vars (OPERITAS_INGEST_API_KEY,
+	// OPERITAS_INGEST_URL, OPERITAS_COLLECTOR_ID); no config file required.
 	drainDLQ := flag.Bool("drain-dlq", false,
 		"replay all DLQ files from /var/lib/operitas/dlq/ into the WAL and exit")
+	emitEvent := flag.Bool("emit-event", false,
+		"build one synthetic envelope from --tenant-id/--event-type/--event-source flags, ship it to the ingest API, and exit")
 	flag.Parse()
 
 	// Structured JSON logs to stdout only. Never write logs to disk.
@@ -63,6 +71,26 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("drain-dlq complete")
+		os.Exit(0)
+	}
+
+	if *emitEvent {
+		subFlags := flag.NewFlagSet("emit-event", flag.ContinueOnError)
+		f, err := parseEmitEventFlags(subFlags, flag.Args())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "emit-event: %v\n", err)
+			os.Exit(2)
+		}
+		if err := validateEmitEventFlags(f); err != nil {
+			fmt.Fprintf(os.Stderr, "emit-event: %v\n", err)
+			os.Exit(2)
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+		defer stop()
+		if err := runEmitEvent(ctx, f); err != nil {
+			slog.Error("emit-event failed", "err", err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 
