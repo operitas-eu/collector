@@ -6,9 +6,10 @@ on:
       - "v*"
 
 permissions:
-  contents: write   # create GitHub release and upload assets
-  packages: write   # push to ghcr.io
-  id-token: write   # sigstore keyless signing via OIDC
+  contents: write          # create GitHub release and upload assets
+  packages: write          # push to ghcr.io
+  id-token: write          # sigstore keyless signing via OIDC
+  security-events: write   # upload Trivy SARIF to GitHub Security tab
 
 env:
   REGISTRY: ghcr.io
