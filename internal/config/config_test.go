@@ -70,6 +70,63 @@ func TestAPIKeyPopulatedFromEnv(t *testing.T) {
 	}
 }
 
+// TestGitLabRequiresToken verifies that enabling the gitlab source without
+// OPERITAS_GITLAB_TOKEN produces a guidance error pointing at that env var.
+func TestGitLabRequiresToken(t *testing.T) {
+	t.Setenv("OPERITAS_INGEST_API_KEY", "testid0000000000.dGVzdA")
+	t.Setenv("OPERITAS_GITLAB_TOKEN", "")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "tenant_id: \"aaaaaaaa-0000-0000-0000-000000000001\"\n" +
+		"collector_id: \"bbbbbbbb-0000-0000-0000-000000000001\"\n" +
+		"ingest:\n" +
+		"  tls_cert_file: \"/nonexistent/tls.crt\"\n" +
+		"  tls_key_file:  \"/nonexistent/tls.key\"\n" +
+		"sources:\n" +
+		"  gitlab:\n" +
+		"    enabled: true\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error when gitlab is enabled without a token")
+	}
+	if !strings.Contains(err.Error(), "OPERITAS_GITLAB_TOKEN") {
+		t.Errorf("error does not mention OPERITAS_GITLAB_TOKEN: %v", err)
+	}
+}
+
+// TestGitLabRejectsNonEUBaseURL verifies the non-EU heuristic fires for the
+// gitlab source's base URL when an obvious US-region fragment is present.
+func TestGitLabRejectsNonEUBaseURL(t *testing.T) {
+	t.Setenv("OPERITAS_INGEST_API_KEY", "testid0000000000.dGVzdA")
+	t.Setenv("OPERITAS_GITLAB_TOKEN", "glpat-x")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "tenant_id: \"aaaaaaaa-0000-0000-0000-000000000001\"\n" +
+		"collector_id: \"bbbbbbbb-0000-0000-0000-000000000001\"\n" +
+		"ingest:\n" +
+		"  tls_cert_file: \"/nonexistent/tls.crt\"\n" +
+		"  tls_key_file:  \"/nonexistent/tls.key\"\n" +
+		"sources:\n" +
+		"  gitlab:\n" +
+		"    enabled: true\n" +
+		"    base_url: \"https://gitlab.us-east-1.example.com/api/v4\"\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for non-EU gitlab base_url")
+	}
+	if !strings.Contains(err.Error(), "non-EU") {
+		t.Errorf("error does not mention non-EU: %v", err)
+	}
+}
+
 // TestAPIKeyNeverAppearsInValidationError ensures that the raw key value is
 // never echoed back in any error string. The validation only checks for
 // presence, not format, so there is no format-error path that could leak the

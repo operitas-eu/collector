@@ -38,6 +38,13 @@ data:
         webhook_port: {{ .Values.sources.github.webhookPort }}
         poll_interval: {{ .Values.sources.github.pollInterval | quote }}
 
+      gitlab:
+        enabled: {{ .Values.sources.gitlab.enabled }}
+        base_url: {{ .Values.sources.gitlab.baseUrl | quote }}
+        projects: {{ toJson .Values.sources.gitlab.projects }}
+        webhook_port: {{ .Values.sources.gitlab.webhookPort }}
+        poll_interval: {{ .Values.sources.gitlab.pollInterval | quote }}
+
       pagerduty:
         enabled: {{ .Values.sources.pagerduty.enabled }}
         webhook_port: {{ .Values.sources.pagerduty.webhookPort }}

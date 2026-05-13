@@ -39,6 +39,7 @@ const (
 	SourceAWSCloudTrail EventSource = "aws.cloudtrail"
 	SourceAzureActivity EventSource = "azure.activity"
 	SourceGitHub        EventSource = "github"
+	SourceGitLab        EventSource = "gitlab"
 	SourcePagerDuty     EventSource = "pagerduty"
 	SourceDatadog       EventSource = "datadog"
 	SourceJira          EventSource = "jira"
@@ -56,6 +57,7 @@ var validSources = map[EventSource]struct{}{
 	SourceAWSCloudTrail: {},
 	SourceAzureActivity: {},
 	SourceGitHub:        {},
+	SourceGitLab:        {},
 	SourcePagerDuty:     {},
 	SourceDatadog:       {},
 	SourceJira:          {},

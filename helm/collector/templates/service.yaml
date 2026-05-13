@@ -14,6 +14,10 @@ spec:
       port: {{ .Values.ports.githubWebhook }}
       targetPort: github-webhook
       protocol: TCP
+    - name: gitlab-webhook
+      port: {{ .Values.ports.gitlabWebhook }}
+      targetPort: gitlab-webhook
+      protocol: TCP
     - name: pd-webhook
       port: {{ .Values.ports.pagerdutyWebhook }}
       targetPort: pd-webhook

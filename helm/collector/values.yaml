@@ -62,6 +62,7 @@ resources:
 ports:
   githubWebhook: 8081
   pagerdutyWebhook: 8082
+  gitlabWebhook: 8083
   metrics: 9090
 
 # Ingest endpoint. Must be an EU-resident host (validated at startup).
@@ -124,6 +125,18 @@ sources:
     pollInterval: "60s"
     # Token and webhook secret are injected from the Secret (see secretName below).
 
+  gitlab:
+    enabled: false
+    # baseUrl is the GitLab API root. Use a self-hosted EU instance for strict
+    # residency requirements; gitlab.com SaaS is accepted but US-hosted.
+    baseUrl: "https://gitlab.com/api/v4"
+    # Optional: specific projects (numeric IDs or "group/repo" paths). If empty,
+    # all projects the token can access (membership=true) are polled.
+    projects: []
+    webhookPort: 8083
+    pollInterval: "60s"
+    # Token and webhook secret are injected from the Secret (see secretName below).
+
   pagerduty:
     enabled: false
     webhookPort: 8082
@@ -131,6 +144,7 @@ sources:
 
 # Name of the Secret holding source credentials.
 # Expected keys: OPERITAS_GITHUB_TOKEN, OPERITAS_GITHUB_WEBHOOK_SECRET,
+#                OPERITAS_GITLAB_TOKEN, OPERITAS_GITLAB_WEBHOOK_SECRET,
 #                OPERITAS_PD_SIGNING_SECRET, OPERITAS_REDACT_HASH_KEY
 secretName: "collector-secrets"
 

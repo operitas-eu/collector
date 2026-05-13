@@ -59,6 +59,9 @@ spec:
             - name: github-webhook
               containerPort: {{ .Values.ports.githubWebhook }}
               protocol: TCP
+            - name: gitlab-webhook
+              containerPort: {{ .Values.ports.gitlabWebhook }}
+              protocol: TCP
             - name: pd-webhook
               containerPort: {{ .Values.ports.pagerdutyWebhook }}
               protocol: TCP

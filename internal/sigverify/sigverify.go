@@ -6,6 +6,7 @@ package sigverify
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"strings"
 )
@@ -30,4 +31,16 @@ func HexHMACPrefixed(secret, body []byte, header, prefix string) bool {
 		return false
 	}
 	return HexHMAC(secret, body, header[len(prefix):])
+}
+
+// SecretEqual reports whether got equals want in constant time. Use this for
+// webhook senders that authenticate with a plain shared secret rather than an
+// HMAC signature (e.g. GitLab's X-Gitlab-Token header). Returns false if either
+// input is empty so a misconfigured secret cannot accidentally accept any
+// request.
+func SecretEqual(want, got string) bool {
+	if want == "" || got == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }

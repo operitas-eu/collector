@@ -30,6 +30,7 @@ import (
 	"operitas.eu/collector/internal/redact"
 	"operitas.eu/collector/internal/sources/awscloudtrail"
 	"operitas.eu/collector/internal/sources/github"
+	"operitas.eu/collector/internal/sources/gitlab"
 	"operitas.eu/collector/internal/sources/pagerduty"
 	"operitas.eu/collector/internal/transport"
 )
@@ -187,6 +188,30 @@ func main() {
 		}
 	}
 
+	if cfg.Sources.GitLab.Enabled {
+		gl := gitlab.New(cfg.Sources.GitLab, r, emit)
+
+		if cfg.Sources.GitLab.WebhookSecret != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := gl.RunWebhook(ctx); err != nil {
+					slog.Error("gitlab webhook server exited with error", "err", err)
+				}
+			}()
+		}
+
+		// Polling fallback runs whenever a token is present; cfg.Token is
+		// already required by config.validate when GitLab is enabled.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := gl.RunPoller(ctx); err != nil {
+				slog.Error("gitlab poller exited with error", "err", err)
+			}
+		}()
+	}
+
 	if cfg.Sources.PagerDuty.Enabled {
 		pd := pagerduty.New(cfg.Sources.PagerDuty, r, emit)
 		wg.Add(1)
@@ -221,6 +246,7 @@ func main() {
 		"collector_id", cfg.CollectorID,
 		"cloudtrail_enabled", cfg.Sources.CloudTrail.Enabled,
 		"github_enabled", cfg.Sources.GitHub.Enabled,
+		"gitlab_enabled", cfg.Sources.GitLab.Enabled,
 		"pagerduty_enabled", cfg.Sources.PagerDuty.Enabled,
 	)
 

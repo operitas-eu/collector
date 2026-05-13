@@ -81,6 +81,7 @@ type IngestConfig struct {
 type SourcesConfig struct {
 	CloudTrail CloudTrailConfig `yaml:"cloudtrail"`
 	GitHub     GitHubConfig     `yaml:"github"`
+	GitLab     GitLabConfig     `yaml:"gitlab"`
 	PagerDuty  PagerDutyConfig  `yaml:"pagerduty"`
 }
 
@@ -128,6 +129,41 @@ type GitHubConfig struct {
 	WebhookSecret string `yaml:"-"`
 
 	// WebhookPort is the port on which the collector listens for GitHub webhooks.
+	WebhookPort int `yaml:"webhook_port"`
+
+	// PollInterval controls the polling fallback schedule.
+	PollInterval time.Duration `yaml:"poll_interval"`
+}
+
+// GitLabConfig configures the GitLab event source (webhook + polling fallback).
+// Read-only GET endpoints only: /projects, /projects/:id/merge_requests,
+// /projects/:id/deployments. The collector never calls any POST/PUT/DELETE.
+type GitLabConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// BaseURL is the GitLab API root, e.g. "https://gitlab.com/api/v4" for SaaS
+	// or "https://gitlab.example.eu/api/v4" for a self-hosted EU instance.
+	// Validated against isKnownNonEUEndpoint at startup; self-hosted operators
+	// with strict residency requirements should point at an EU-resident host.
+	BaseURL string `yaml:"base_url"`
+
+	// Projects is the list of project IDs or url-encoded paths (e.g.
+	// "mygroup%2Fmyrepo") to poll. If empty, all projects the token has access
+	// to (membership=true) are listed via GET /projects.
+	Projects []string `yaml:"projects"`
+
+	// Token is a personal access token or group/project access token with
+	// read_api scope. Delivered via OPERITAS_GITLAB_TOKEN; never stored in YAML.
+	Token string `yaml:"-"`
+
+	// WebhookSecret is the shared secret matched against the X-Gitlab-Token
+	// header. GitLab's default webhook auth is plain-secret equality, not HMAC;
+	// verified via sigverify.SecretEqual (constant-time). Delivered via
+	// OPERITAS_GITLAB_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// WebhookPort is the port the collector listens on for GitLab webhooks.
+	// Defaults to 8083 to avoid collision with GitHub (8081) and PagerDuty (8082).
 	WebhookPort int `yaml:"webhook_port"`
 
 	// PollInterval controls the polling fallback schedule.
@@ -224,6 +260,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sources.GitHub.PollInterval == 0 {
 		cfg.Sources.GitHub.PollInterval = 60 * time.Second
 	}
+	if cfg.Sources.GitLab.BaseURL == "" {
+		cfg.Sources.GitLab.BaseURL = "https://gitlab.com/api/v4"
+	}
+	if cfg.Sources.GitLab.WebhookPort == 0 {
+		cfg.Sources.GitLab.WebhookPort = 8083
+	}
+	if cfg.Sources.GitLab.PollInterval == 0 {
+		cfg.Sources.GitLab.PollInterval = 60 * time.Second
+	}
 	if cfg.Sources.PagerDuty.WebhookPort == 0 {
 		cfg.Sources.PagerDuty.WebhookPort = 8082
 	}
@@ -241,6 +286,12 @@ func populateSecrets(cfg *Config) {
 	}
 	if v := os.Getenv("OPERITAS_GITHUB_WEBHOOK_SECRET"); v != "" {
 		cfg.Sources.GitHub.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_GITLAB_TOKEN"); v != "" {
+		cfg.Sources.GitLab.Token = v
+	}
+	if v := os.Getenv("OPERITAS_GITLAB_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.GitLab.WebhookSecret = v
 	}
 	if v := os.Getenv("OPERITAS_PD_SIGNING_SECRET"); v != "" {
 		cfg.Sources.PagerDuty.SigningSecret = v
@@ -314,6 +365,15 @@ func validate(cfg *Config) error {
 	if cfg.Sources.GitHub.Enabled {
 		if cfg.Sources.GitHub.Token == "" {
 			errs = append(errs, errors.New("OPERITAS_GITHUB_TOKEN is required when github source is enabled"))
+		}
+	}
+
+	if cfg.Sources.GitLab.Enabled {
+		if cfg.Sources.GitLab.Token == "" {
+			errs = append(errs, errors.New("OPERITAS_GITLAB_TOKEN is required when gitlab source is enabled"))
+		}
+		if isKnownNonEUEndpoint(cfg.Sources.GitLab.BaseURL) {
+			errs = append(errs, fmt.Errorf("sources.gitlab.base_url %q appears to be a non-EU endpoint; point at an EU-resident GitLab instance", cfg.Sources.GitLab.BaseURL))
 		}
 	}
 

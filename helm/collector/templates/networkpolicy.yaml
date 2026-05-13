@@ -20,6 +20,8 @@ spec:
     - ports:
         - port: {{ .Values.ports.githubWebhook }}
           protocol: TCP
+        - port: {{ .Values.ports.gitlabWebhook }}
+          protocol: TCP
         - port: {{ .Values.ports.pagerdutyWebhook }}
           protocol: TCP
       {{- if .Values.networkPolicy.ingressCidr }}
