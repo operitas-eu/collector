@@ -50,6 +50,8 @@ kubectl create secret generic collector-secrets \
   --namespace operitas \
   --from-literal=OPERITAS_GITHUB_TOKEN=ghp_... \
   --from-literal=OPERITAS_GITHUB_WEBHOOK_SECRET=whsec_... \
+  --from-literal=OPERITAS_GITLAB_TOKEN=glpat_... \
+  --from-literal=OPERITAS_GITLAB_WEBHOOK_SECRET=glwh_... \
   --from-literal=OPERITAS_PD_SIGNING_SECRET=pdsk_...
 
 # 4. Install the chart, referencing the API key secret you just created:
@@ -194,8 +196,8 @@ collector upgrade.
 ```
 
 `event-source` must be one of the enum values in the evidence envelope schema:
-`aws.cloudtrail`, `azure.activity`, `github`, `pagerduty`, `datadog`, `jira`,
-`argocd`, `k8s.audit`, `vendor.statuspage`.
+`aws.cloudtrail`, `azure.activity`, `github`, `gitlab`, `pagerduty`, `datadog`,
+`jira`, `argocd`, `k8s.audit`, `vendor.statuspage`.
 
 ### Exit codes
 
@@ -256,6 +258,7 @@ On success the structured log will include:
 |---|---|---|
 | AWS CloudTrail | Log files delivered to an S3 bucket | `s3:ListObjectsV2`, `s3:GetObject` |
 | GitHub | Pull requests, deployment events | `GET` REST endpoints; webhook receiver |
+| GitLab | Merge requests, deployment events | `GET` REST endpoints; webhook receiver |
 | PagerDuty | Incident lifecycle events | Webhook receiver |
 
 ## What this collector never reads or writes
