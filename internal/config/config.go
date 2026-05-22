@@ -7,6 +7,7 @@ package config
 
 import (
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -383,8 +384,12 @@ func validate(cfg *Config) error {
 		}
 	}
 
-	if cfg.Redact.HashPII && cfg.Redact.HashKey == "" {
-		errs = append(errs, errors.New("OPERITAS_REDACT_HASH_KEY is required when redact.hash_pii is true"))
+	if cfg.Redact.HashPII {
+		if cfg.Redact.HashKey == "" {
+			errs = append(errs, errors.New("OPERITAS_REDACT_HASH_KEY is required when redact.hash_pii is true"))
+		} else if _, err := hex.DecodeString(cfg.Redact.HashKey); err != nil {
+			errs = append(errs, errors.New("OPERITAS_REDACT_HASH_KEY must be a valid hex string when redact.hash_pii is true"))
+		}
 	}
 
 	return errors.Join(errs...)

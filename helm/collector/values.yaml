@@ -151,7 +151,21 @@ secretName: "collector-secrets"
 # PII redaction policy. Default: hard redact (strip the field entirely).
 redact:
   hashPii: false
-  # hashKey is read from the Secret when hashPii is true.
+  # When hashPii is true, OPERITAS_REDACT_HASH_KEY must be set in the Secret
+  # referenced by secretName. The value must be a valid hex-encoded string
+  # (e.g. a 32-byte key expressed as 64 hex characters). The collector refuses
+  # to start if hash_pii is enabled and the env var is absent or contains
+  # non-hex characters.
+
+# LOG_LEVEL controls the structured-log verbosity for the collector process.
+# Valid values: debug, info (default), warn, error.
+# Set via an environment variable on the Deployment — not stored in the ConfigMap
+# because it is not a secret and does not require a restart on change in most
+# setups. Add it under spec.containers[].env in an overlay values file:
+#   env:
+#     - name: LOG_LEVEL
+#       value: debug
+logLevel: ""
 
 metrics:
   port: 9090
