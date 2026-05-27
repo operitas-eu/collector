@@ -61,15 +61,23 @@ func walWrite(dir, idempotencyKey string, payload []byte) error {
 		_ = d.Sync()
 		d.Close()
 	}
+	incWALWrites()
 	return nil
 }
 
 // walDelete removes a WAL entry once the batch has been successfully delivered.
+// The metrics counter is only incremented when a file is actually removed —
+// a missing file is treated as a no-op (caller may call delete on an entry
+// that walPrune already evicted) and not double-counted.
 func walDelete(dir, idempotencyKey string) error {
 	path := filepath.Join(dir, idempotencyKey+walExt)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return fmt.Errorf("wal delete: %w", err)
 	}
+	incWALDeletes()
 	return nil
 }
 
@@ -106,6 +114,7 @@ func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 				slog.Warn("wal: prune by age failed", "path", path, "err", err)
 				continue
 			}
+			incWALPrunedByAge()
 			slog.Info("wal: pruned aged entry", "path", path, "age", time.Since(info.ModTime()))
 			continue
 		}
@@ -130,6 +139,7 @@ func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 			slog.Warn("wal: prune by size failed", "path", f.path, "err", err)
 			continue
 		}
+		incWALPrunedBySize()
 		slog.Info("wal: pruned oversized spool entry", "path", f.path, "size", f.size)
 		total -= f.size
 	}
