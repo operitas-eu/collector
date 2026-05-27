@@ -665,6 +665,7 @@ func (c *Client) replayWAL(ctx context.Context) error {
 		return err
 	}
 	for _, entry := range entries {
+		incWALReplays()
 		slog.Info("replaying wal entry", "idempotency_key", entry.IdempotencyKey)
 		// Determine event count from the WAL payload for the seq-span check.
 		var batch envelope.BatchRequest

@@ -292,6 +292,7 @@ func metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "# TYPE operitas_collector_build_info gauge\n")
 	fmt.Fprintf(w, "operitas_collector_build_info{version=%q} 1\n", version)
 	transport.WriteDLQMetrics(w)
+	transport.WriteWALMetrics(w)
 }
 
 func healthzHandler(w http.ResponseWriter, _ *http.Request) {
