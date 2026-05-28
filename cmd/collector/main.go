@@ -4,6 +4,7 @@
 //
 // The collector never writes to customer systems. It only reads:
 //   - AWS S3 (CloudTrail log files) via s3:ListObjectsV2 + s3:GetObject
+//   - Azure Activity Logs via Azure Monitor ARM read API
 //   - GitHub REST API (PRs, deployments) via GET endpoints
 //   - GitHub webhook payloads (passive HTTP listener)
 //   - PagerDuty webhook payloads (passive HTTP listener)
@@ -29,6 +30,7 @@ import (
 	"operitas.eu/collector/internal/envelope"
 	"operitas.eu/collector/internal/redact"
 	"operitas.eu/collector/internal/sources/awscloudtrail"
+	"operitas.eu/collector/internal/sources/azureactivity"
 	"operitas.eu/collector/internal/sources/github"
 	"operitas.eu/collector/internal/sources/gitlab"
 	"operitas.eu/collector/internal/sources/pagerduty"
@@ -164,6 +166,21 @@ func main() {
 		}()
 	}
 
+	if cfg.Sources.AzureActivity.Enabled {
+		az, err := azureactivity.New(cfg.Sources.AzureActivity, r, emit)
+		if err != nil {
+			slog.Error("azureactivity source init failed", "err", err)
+			os.Exit(1)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := az.Run(ctx); err != nil {
+				slog.Error("azureactivity source exited with error", "err", err)
+			}
+		}()
+	}
+
 	if cfg.Sources.GitHub.Enabled {
 		gh := github.New(cfg.Sources.GitHub, r, emit)
 
@@ -245,6 +262,7 @@ func main() {
 		"tenant_id", cfg.TenantID,
 		"collector_id", cfg.CollectorID,
 		"cloudtrail_enabled", cfg.Sources.CloudTrail.Enabled,
+		"azure_activity_enabled", cfg.Sources.AzureActivity.Enabled,
 		"github_enabled", cfg.Sources.GitHub.Enabled,
 		"gitlab_enabled", cfg.Sources.GitLab.Enabled,
 		"pagerduty_enabled", cfg.Sources.PagerDuty.Enabled,

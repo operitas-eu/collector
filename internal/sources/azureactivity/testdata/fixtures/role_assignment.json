@@ -1,0 +1,32 @@
+{
+  "eventTimestamp": "2026-05-28T10:30:00.000000000Z",
+  "operationName": {
+    "value": "Microsoft.Authorization/roleAssignments/write",
+    "localizedValue": "Create role assignment"
+  },
+  "status": {
+    "value": "Succeeded",
+    "localizedValue": "Succeeded"
+  },
+  "resourceId": "/subscriptions/aaaaaaaa-0000-0000-0000-000000000001/resourceGroups/prod-eu/providers/Microsoft.Authorization/roleAssignments/bbbbbbbb-0000-0000-0000-000000000001",
+  "resourceGroupName": "prod-eu",
+  "subscriptionId": "aaaaaaaa-0000-0000-0000-000000000001",
+  "correlationId": "dddddddd-0000-0000-0000-000000000001",
+  "level": "Informational",
+  "category": {
+    "value": "Administrative",
+    "localizedValue": "Administrative"
+  },
+  "resourceType": {
+    "value": "Microsoft.Authorization/roleAssignments",
+    "localizedValue": "Role Assignments"
+  },
+  "authorization": {
+    "action": "Microsoft.Authorization/roleAssignments/write",
+    "scope": "/subscriptions/aaaaaaaa-0000-0000-0000-000000000001",
+    "principal": "deploy-bot"
+  },
+  "claims": {
+    "appid": "service-principal-app-id"
+  }
+}

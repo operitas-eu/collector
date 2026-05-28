@@ -1,0 +1,29 @@
+{
+  "eventTimestamp": "2026-05-28T09:00:00.000000000Z",
+  "operationName": {
+    "value": "Microsoft.Compute/virtualMachines/write",
+    "localizedValue": "Create or Update Virtual Machine"
+  },
+  "status": {
+    "value": "Succeeded",
+    "localizedValue": "Succeeded"
+  },
+  "resourceId": "/subscriptions/aaaaaaaa-0000-0000-0000-000000000001/resourceGroups/prod-eu/providers/Microsoft.Compute/virtualMachines/web-1",
+  "resourceGroupName": "prod-eu",
+  "subscriptionId": "aaaaaaaa-0000-0000-0000-000000000001",
+  "correlationId": "cccccccc-0000-0000-0000-000000000001",
+  "level": "Informational",
+  "category": {
+    "value": "Administrative",
+    "localizedValue": "Administrative"
+  },
+  "resourceType": {
+    "value": "Microsoft.Compute/virtualMachines",
+    "localizedValue": "Virtual Machines"
+  },
+  "authorization": {
+    "action": "Microsoft.Compute/virtualMachines/write",
+    "scope": "/subscriptions/aaaaaaaa-0000-0000-0000-000000000001/resourceGroups/prod-eu/providers/Microsoft.Compute/virtualMachines/web-1",
+    "principal": "ops-service-principal"
+  }
+}

@@ -257,6 +257,7 @@ On success the structured log will include:
 | Source | What | How |
 |---|---|---|
 | AWS CloudTrail | Log files delivered to an S3 bucket | `s3:ListObjectsV2`, `s3:GetObject` |
+| Azure Activity Logs | Management-plane audit log for an Azure subscription | Azure Monitor ARM read API (`GET` only) |
 | GitHub | Pull requests, deployment events | `GET` REST endpoints; webhook receiver |
 | GitLab | Merge requests, deployment events | `GET` REST endpoints; webhook receiver |
 | PagerDuty | Incident lifecycle events | Webhook receiver |
