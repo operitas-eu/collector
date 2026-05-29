@@ -31,6 +31,15 @@ data:
         prefix: {{ .Values.sources.cloudtrail.prefix | quote }}
         poll_interval: {{ .Values.sources.cloudtrail.pollInterval | quote }}
 
+      azure_activity:
+        enabled: {{ .Values.sources.azure_activity.enabled }}
+        tenant_id: {{ .Values.sources.azure_activity.tenantId | quote }}
+        subscription_id: {{ .Values.sources.azure_activity.subscriptionId | quote }}
+        client_id: {{ .Values.sources.azure_activity.clientId | quote }}
+        use_workload_identity: {{ .Values.sources.azure_activity.useWorkloadIdentity }}
+        poll_interval: {{ .Values.sources.azure_activity.pollInterval | quote }}
+        poll_lookback: {{ .Values.sources.azure_activity.pollLookback | quote }}
+
       github:
         enabled: {{ .Values.sources.github.enabled }}
         org: {{ .Values.sources.github.org | quote }}

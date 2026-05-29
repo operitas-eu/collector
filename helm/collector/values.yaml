@@ -116,6 +116,37 @@ sources:
     prefix: "AWSLogs/"
     pollInterval: "5m"
 
+  azure_activity:
+    enabled: false
+
+    # tenantId is the Azure Active Directory tenant ID (UUID).
+    tenantId: ""
+
+    # subscriptionId is the Azure subscription to monitor (UUID).
+    subscriptionId: ""
+
+    # clientId is the service principal or managed-identity client ID.
+    # Leave empty when using a system-assigned managed identity.
+    clientId: ""
+
+    # useWorkloadIdentity, when true, uses Azure Workload Identity (federated OIDC
+    # token exchange) instead of a client secret. Requires AKS with Workload Identity
+    # enabled. The pod service account must be annotated with
+    #   azure.workload.identity/client-id: <managed-identity-client-id>
+    # and the serviceAccount.annotations block below must have the same annotation.
+    useWorkloadIdentity: false
+
+    # pollInterval controls how often Activity Logs are fetched from the ARM API.
+    pollInterval: "5m"
+
+    # pollLookback is the time window used on the first poll when no checkpoint exists.
+    pollLookback: "1h"
+
+    # clientSecret is the service-principal client secret.
+    # MUST be supplied via the collector-secrets Secret under key
+    # OPERITAS_AZURE_CLIENT_SECRET — never set this value directly in values.yaml.
+    # If useWorkloadIdentity is true, this key is not required.
+
   github:
     enabled: false
     org: ""
@@ -145,7 +176,9 @@ sources:
 # Name of the Secret holding source credentials.
 # Expected keys: OPERITAS_GITHUB_TOKEN, OPERITAS_GITHUB_WEBHOOK_SECRET,
 #                OPERITAS_GITLAB_TOKEN, OPERITAS_GITLAB_WEBHOOK_SECRET,
-#                OPERITAS_PD_SIGNING_SECRET, OPERITAS_REDACT_HASH_KEY
+#                OPERITAS_PD_SIGNING_SECRET, OPERITAS_REDACT_HASH_KEY,
+#                OPERITAS_AZURE_CLIENT_SECRET (required when azure_activity is
+#                enabled with client-secret auth and useWorkloadIdentity is false)
 secretName: "collector-secrets"
 
 # PII redaction policy. Default: hard redact (strip the field entirely).

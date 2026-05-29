@@ -31,10 +31,6 @@ const EnvelopeVersion = "1.0.0"
 type EventSource string
 
 // EventSource enum values — kept in lockstep with the JSON schema.
-// SourceAzureActivity is declared for schema completeness; the Azure collector
-// source package is not yet implemented (a new internal/sources/azure/
-// package plus the AWS-style read-only API audit is required first —
-// architectural review 2026-05-07).
 const (
 	SourceAWSCloudTrail EventSource = "aws.cloudtrail"
 	SourceAzureActivity EventSource = "azure.activity"

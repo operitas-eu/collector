@@ -1,5 +1,14 @@
 # Changelog — collector Helm Chart
 
+## 0.3.0 — 2026-05-28
+
+### Added
+- `sources.azure_activity` values block (enabled, tenantId, subscriptionId,
+  clientId, useWorkloadIdentity, pollInterval, pollLookback). Disabled by default.
+- ConfigMap template renders `azure_activity:` stanza into the collector config.
+- `OPERITAS_AZURE_CLIENT_SECRET` key documented in `secret-stub.yaml` comments.
+- README section covering Workload Identity, client-secret, and RBAC setup.
+
 ## 0.2.0 — 2026-05-08
 
 ### Changed

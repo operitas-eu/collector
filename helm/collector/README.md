@@ -14,6 +14,7 @@ Here is what it does and what it never does.
 |---|---|---|
 | AWS CloudTrail | `s3:ListObjectsV2` on your CloudTrail delivery bucket | Read |
 | AWS CloudTrail | `s3:GetObject` on CloudTrail log files | Read |
+| Azure Activity Logs | `GET /subscriptions/{id}/providers/microsoft.insights/eventtypes/management/values` | Read |
 | GitHub | `GET /orgs/{org}/repos` | Read |
 | GitHub | `GET /repos/{owner}/{repo}/pulls` | Read |
 | GitHub | `GET /repos/{owner}/{repo}/deployments` | Read |
@@ -135,6 +136,56 @@ Attach the following read-only policy to the IRSA role:
 ```
 
 No other AWS permissions are required or should be granted.
+
+## Azure Activity Logs — authentication
+
+The collector supports three authentication modes for Azure Activity Logs.
+Configure the mode that matches your deployment:
+
+### Workload Identity (recommended for AKS)
+
+Enable Azure Workload Identity on your AKS cluster and annotate the
+collector service account with the managed-identity client ID:
+
+```yaml
+sources:
+  azure_activity:
+    enabled: true
+    tenantId: "your-aad-tenant-uuid"
+    subscriptionId: "your-subscription-uuid"
+    clientId: "your-managed-identity-client-uuid"
+    useWorkloadIdentity: true
+
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: "your-managed-identity-client-uuid"
+```
+
+No secret is required. The pod must carry the `azure.workload.identity/use: "true"` label
+(the chart adds this automatically when `useWorkloadIdentity: true`).
+
+### Client secret (service principal)
+
+Add `OPERITAS_AZURE_CLIENT_SECRET` to the `collector-secrets` Secret, then set:
+
+```yaml
+sources:
+  azure_activity:
+    enabled: true
+    tenantId: "your-aad-tenant-uuid"
+    subscriptionId: "your-subscription-uuid"
+    clientId: "your-service-principal-client-uuid"
+    useWorkloadIdentity: false
+```
+
+The service principal must have the `Reader` role on the target subscription.
+No write permissions are required or should be granted.
+
+### Azure RBAC required role
+
+Assign the built-in `Reader` role (or a custom role with only
+`microsoft.insights/eventtypes/management/values/read`) to the identity
+(managed identity or service principal) on the subscription being monitored.
 
 ## GitHub App permissions
 

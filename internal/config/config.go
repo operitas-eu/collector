@@ -80,10 +80,11 @@ type IngestConfig struct {
 
 // SourcesConfig enables or disables each event source.
 type SourcesConfig struct {
-	CloudTrail CloudTrailConfig `yaml:"cloudtrail"`
-	GitHub     GitHubConfig     `yaml:"github"`
-	GitLab     GitLabConfig     `yaml:"gitlab"`
-	PagerDuty  PagerDutyConfig  `yaml:"pagerduty"`
+	CloudTrail    CloudTrailConfig    `yaml:"cloudtrail"`
+	AzureActivity AzureActivityConfig `yaml:"azure_activity"`
+	GitHub        GitHubConfig        `yaml:"github"`
+	GitLab        GitLabConfig        `yaml:"gitlab"`
+	PagerDuty     PagerDutyConfig     `yaml:"pagerduty"`
 }
 
 // CloudTrailConfig configures the AWS CloudTrail S3 reader.
@@ -106,6 +107,59 @@ type CloudTrailConfig struct {
 
 	// CursorPath is the file used to persist the last-processed S3 key so
 	// restarts skip already-seen objects. Defaults to DataDir/cloudtrail_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// AzureActivityConfig configures the Azure Activity Logs poller.
+//
+// Authentication precedence (applied by the source package):
+//  1. Azure Workload Identity (UseWorkloadIdentity: true) — preferred in AKS.
+//     Requires the pod service account to be federated with an Azure managed identity.
+//  2. Client secret (OPERITAS_AZURE_CLIENT_SECRET set) — for non-AKS deployments.
+//  3. Managed Identity (system-assigned or user-assigned) — fallback when running
+//     on Azure VMs or AKS without Workload Identity federation.
+//
+// ClientID and TenantID are always required.
+// ClientSecret must not be stored in YAML; use OPERITAS_AZURE_CLIENT_SECRET.
+//
+// The Activity Logs API endpoint is the Azure Resource Manager global endpoint
+// (management.azure.com). This endpoint processes only metadata about your
+// Azure operations, not customer event payload data. The subscription and
+// tenant being monitored must be EU-resident for the EU-only data path to hold.
+type AzureActivityConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// TenantID is the Azure Active Directory tenant ID (UUID).
+	TenantID string `yaml:"tenant_id"`
+
+	// SubscriptionID is the Azure subscription to monitor (UUID).
+	SubscriptionID string `yaml:"subscription_id"`
+
+	// ClientID is the service principal or managed-identity client ID.
+	// Required for client-secret and workload-identity modes.
+	// For system-assigned managed identity, leave empty.
+	ClientID string `yaml:"client_id"`
+
+	// ClientSecret is the service-principal client secret.
+	// Never stored in YAML — populated via OPERITAS_AZURE_CLIENT_SECRET.
+	ClientSecret string `yaml:"-"`
+
+	// UseWorkloadIdentity, when true, uses Azure Workload Identity
+	// (federated OIDC token) instead of a client secret. Requires AKS with
+	// Workload Identity enabled and the pod service account annotated with the
+	// managed-identity client ID.
+	UseWorkloadIdentity bool `yaml:"use_workload_identity"`
+
+	// PollInterval controls how often Activity Logs are fetched.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// PollLookback is the time window fetched on the first poll (no cursor).
+	// Defaults to 1 hour. Keep this shorter than your poll interval to avoid
+	// re-processing events on restart.
+	PollLookback time.Duration `yaml:"poll_lookback"`
+
+	// CursorPath is where the last-seen event timestamp is persisted.
+	// Defaults to DataDir/azureactivity_cursor.
 	CursorPath string `yaml:"cursor_path"`
 }
 
@@ -255,6 +309,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sources.CloudTrail.CursorPath == "" {
 		cfg.Sources.CloudTrail.CursorPath = DataDir + "/cloudtrail_cursor"
 	}
+	if cfg.Sources.AzureActivity.PollInterval == 0 {
+		cfg.Sources.AzureActivity.PollInterval = 5 * time.Minute
+	}
+	if cfg.Sources.AzureActivity.PollLookback == 0 {
+		cfg.Sources.AzureActivity.PollLookback = 1 * time.Hour
+	}
+	if cfg.Sources.AzureActivity.CursorPath == "" {
+		cfg.Sources.AzureActivity.CursorPath = DataDir + "/azureactivity_cursor"
+	}
 	if cfg.Sources.GitHub.WebhookPort == 0 {
 		cfg.Sources.GitHub.WebhookPort = 8081
 	}
@@ -293,6 +356,9 @@ func populateSecrets(cfg *Config) {
 	}
 	if v := os.Getenv("OPERITAS_GITLAB_WEBHOOK_SECRET"); v != "" {
 		cfg.Sources.GitLab.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_AZURE_CLIENT_SECRET"); v != "" {
+		cfg.Sources.AzureActivity.ClientSecret = v
 	}
 	if v := os.Getenv("OPERITAS_PD_SIGNING_SECRET"); v != "" {
 		cfg.Sources.PagerDuty.SigningSecret = v
@@ -361,6 +427,23 @@ func validate(cfg *Config) error {
 		if _, ok := euRegions[cfg.Sources.CloudTrail.BucketRegion]; !ok {
 			errs = append(errs, fmt.Errorf("sources.cloudtrail.bucket_region %q is not an approved EU region", cfg.Sources.CloudTrail.BucketRegion))
 		}
+	}
+
+	if cfg.Sources.AzureActivity.Enabled {
+		if cfg.Sources.AzureActivity.TenantID == "" {
+			errs = append(errs, errors.New("sources.azure_activity.tenant_id is required when azure_activity is enabled"))
+		}
+		if cfg.Sources.AzureActivity.SubscriptionID == "" {
+			errs = append(errs, errors.New("sources.azure_activity.subscription_id is required when azure_activity is enabled"))
+		}
+		// Client secret mode requires ClientID; workload identity mode requires ClientID too.
+		// Managed identity (system-assigned) can work without ClientID.
+		if !cfg.Sources.AzureActivity.UseWorkloadIdentity &&
+			cfg.Sources.AzureActivity.ClientSecret != "" &&
+			cfg.Sources.AzureActivity.ClientID == "" {
+			errs = append(errs, errors.New("sources.azure_activity.client_id is required when azure_activity client_secret is set"))
+		}
+		// Never log ClientSecret — validation only checks presence, not value.
 	}
 
 	if cfg.Sources.GitHub.Enabled {
