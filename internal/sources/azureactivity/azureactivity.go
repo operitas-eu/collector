@@ -25,7 +25,6 @@ package azureactivity
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -423,12 +422,6 @@ func buildCredential(cfg config.AzureActivityConfig) (*azidentity.ChainedTokenCr
 func NormalizeEntryForTest(r *redact.Redactor, entry *armmonitor.EventData) (envelope.Event, bool) {
 	s := &Source{redact: r}
 	return s.normalizeEntry(entry)
-}
-
-// marshalEntry serializes an EventData entry to JSON for test fixtures.
-// Used only in test helpers; not called in the hot path.
-func marshalEntry(entry *armmonitor.EventData) ([]byte, error) {
-	return json.Marshal(entry)
 }
 
 // contains checks if s contains substr (case-sensitive; caller must lowercase).
