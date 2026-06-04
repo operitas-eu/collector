@@ -1,0 +1,57 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "payment-service",
+        "namespace": "production"
+      },
+      "spec": {
+        "project": "payments",
+        "source": {
+          "repoURL": "https://git.example.eu/payments/k8s-manifests",
+          "targetRevision": "v2.3.1",
+          "path": "deploy/production"
+        },
+        "destination": {
+          "server": "https://kubernetes.default.svc",
+          "namespace": "production"
+        }
+      },
+      "status": {
+        "sync": {
+          "status": "Synced",
+          "revision": "deadbeef1234"
+        },
+        "health": {
+          "status": "Healthy",
+          "message": ""
+        },
+        "reconciledAt": "2026-06-01T15:00:00Z",
+        "operationState": {
+          "phase": "Succeeded",
+          "message": "successfully synced (all tasks run)",
+          "startedAt": "2026-06-01T14:59:30Z",
+          "finishedAt": "2026-06-01T15:00:00Z",
+          "syncResult": {
+            "revision": "deadbeef1234",
+            "source": {
+              "repoURL": "https://git.example.eu/payments/k8s-manifests"
+            }
+          },
+          "initiatedBy": {
+            "username": "bob@example.eu"
+          },
+          "operation": {
+            "sync": {
+              "prune": false
+            },
+            "info": []
+          }
+        },
+        "summary": {
+          "images": ["registry.example.eu/payment-service:v2.3.1"]
+        }
+      }
+    }
+  ]
+}

@@ -59,10 +59,18 @@ resources:
     memory: 128Mi
 
 # Ports exposed by the collector.
+#
+# Transitional state: github (8081), gitlab (8083), and pagerduty (8082) run on
+# dedicated ports. All new sources (jira, datadog, prometheus, and the 8 stubs)
+# share a single webhook port (8090 by default). See the "Shared Webhook Router"
+# section in README.md for migration guidance.
 ports:
   githubWebhook: 8081
   pagerdutyWebhook: 8082
   gitlabWebhook: 8083
+  # sharedWebhook is the port for all new sources: jira, datadog, prometheus,
+  # bitbucket, flux, spacelift, incident.io, opsgenie, grafana, servicenow, argocd.
+  sharedWebhook: 8090
   metrics: 9090
 
 # Ingest endpoint. Must be an EU-resident host (validated at startup).
@@ -173,12 +181,123 @@ sources:
     webhookPort: 8082
     # Signing secret is injected from the Secret (see secretName below).
 
+  # sharedWebhookPort is the port all new sources share. Must match ports.sharedWebhook.
+  sharedWebhookPort: 8090
+
+  # ---- Fully implemented sources ----
+
+  jira:
+    enabled: false
+    # baseUrl: Jira API root. Required when enabled.
+    # For Atlassian Cloud EU tenants: "https://<tenant>.atlassian.net"
+    # For self-hosted EU Jira: "https://jira.example.eu"
+    baseUrl: ""
+    # projects: optional list of Jira project keys to watch (e.g. ["OPS", "INFRA"])
+    projects: []
+    # jqlFilter: optional additional JQL clause appended to the poller query
+    jqlFilter: ""
+    pollInterval: "60s"
+    pollLookback: "1h"
+    # Token and webhook secret are injected from the Secret:
+    # OPERITAS_JIRA_TOKEN, OPERITAS_JIRA_WEBHOOK_SECRET
+
+  datadog:
+    enabled: false
+    # apiBaseUrl must be an EU Datadog endpoint:
+    # "https://api.datadoghq.eu" (EU1) or "https://api.eu1.datadoghq.com"
+    apiBaseUrl: "https://api.datadoghq.eu"
+    pollInterval: "60s"
+    pollLookback: "1h"
+    # Secrets injected from Secret:
+    # OPERITAS_DATADOG_WEBHOOK_SECRET (DD-API-KEY for webhook auth)
+    # OPERITAS_DATADOG_TOKEN (DD-API-KEY for poller)
+    # OPERITAS_DATADOG_APP_KEY (DD-APPLICATION-KEY for poller)
+
+  prometheus:
+    enabled: false
+    # authScheme: "bearer" (default), "basic", or "none"
+    authScheme: "bearer"
+    # basicUser: username for basic auth mode only
+    basicUser: ""
+    # Secret: OPERITAS_PROMETHEUS_WEBHOOK_SECRET
+
+  # ---- Stub sources (webhook registered, no event processing yet) ----
+
+  bitbucket:
+    enabled: false
+    # baseUrl: "https://api.bitbucket.org/2.0" (Cloud) or self-hosted EU URL
+    baseUrl: "https://api.bitbucket.org/2.0"
+    workspace: ""
+    repos: []
+    pollInterval: "60s"
+    # Secrets: OPERITAS_BITBUCKET_WEBHOOK_SECRET, OPERITAS_BITBUCKET_TOKEN
+
+  incident_io:
+    enabled: false
+    # apiBaseUrl must be the EU endpoint: "https://api.incident.io/v2"
+    apiBaseUrl: "https://api.incident.io/v2"
+    pollInterval: "60s"
+    pollLookback: "1h"
+    # Secrets: OPERITAS_INCIDENTIO_WEBHOOK_SECRET, OPERITAS_INCIDENTIO_TOKEN
+
+  opsgenie:
+    enabled: false
+    # apiBaseUrl must be the EU endpoint: "https://api.eu.opsgenie.com/v2"
+    apiBaseUrl: "https://api.eu.opsgenie.com/v2"
+    pollInterval: "60s"
+    pollLookback: "1h"
+    # Secrets: OPERITAS_OPSGENIE_WEBHOOK_SECRET, OPERITAS_OPSGENIE_TOKEN
+
+  servicenow:
+    enabled: false
+    # baseUrl: customer's EU-resident ServiceNow instance
+    baseUrl: ""
+    basicUser: "collector"
+    tables:
+      - change_request
+    pollInterval: "60s"
+    pollLookback: "1h"
+    # Secrets: OPERITAS_SERVICENOW_WEBHOOK_SECRET, OPERITAS_SERVICENOW_TOKEN
+
+  argocd:
+    enabled: false
+    # baseUrl: customer's EU-resident Argo CD server
+    baseUrl: ""
+    namespace: "argocd"
+    appSelector: ""
+    pollInterval: "60s"
+    # Secrets: OPERITAS_ARGOCD_WEBHOOK_SECRET, OPERITAS_ARGOCD_TOKEN
+
+  flux:
+    enabled: false
+    # Secret: OPERITAS_FLUX_WEBHOOK_SECRET
+
+  spacelift:
+    enabled: false
+    # Secret: OPERITAS_SPACELIFT_WEBHOOK_SECRET
+
+  grafana:
+    enabled: false
+    # Secret: OPERITAS_GRAFANA_WEBHOOK_SECRET
+
 # Name of the Secret holding source credentials.
-# Expected keys: OPERITAS_GITHUB_TOKEN, OPERITAS_GITHUB_WEBHOOK_SECRET,
-#                OPERITAS_GITLAB_TOKEN, OPERITAS_GITLAB_WEBHOOK_SECRET,
-#                OPERITAS_PD_SIGNING_SECRET, OPERITAS_REDACT_HASH_KEY,
-#                OPERITAS_AZURE_CLIENT_SECRET (required when azure_activity is
-#                enabled with client-secret auth and useWorkloadIdentity is false)
+# Required keys (add only the secrets for sources you enable):
+#   OPERITAS_GITHUB_TOKEN, OPERITAS_GITHUB_WEBHOOK_SECRET
+#   OPERITAS_GITLAB_TOKEN, OPERITAS_GITLAB_WEBHOOK_SECRET
+#   OPERITAS_PD_SIGNING_SECRET
+#   OPERITAS_AZURE_CLIENT_SECRET (required when azure_activity is enabled with client-secret auth)
+#   OPERITAS_JIRA_TOKEN, OPERITAS_JIRA_WEBHOOK_SECRET
+#   OPERITAS_DATADOG_WEBHOOK_SECRET, OPERITAS_DATADOG_TOKEN, OPERITAS_DATADOG_APP_KEY
+#   OPERITAS_PROMETHEUS_WEBHOOK_SECRET
+#   OPERITAS_BITBUCKET_WEBHOOK_SECRET, OPERITAS_BITBUCKET_TOKEN
+#   OPERITAS_INCIDENTIO_WEBHOOK_SECRET, OPERITAS_INCIDENTIO_TOKEN
+#   OPERITAS_OPSGENIE_WEBHOOK_SECRET, OPERITAS_OPSGENIE_TOKEN
+#   OPERITAS_SERVICENOW_WEBHOOK_SECRET, OPERITAS_SERVICENOW_TOKEN
+#   OPERITAS_ARGOCD_WEBHOOK_SECRET, OPERITAS_ARGOCD_TOKEN
+#   OPERITAS_FLUX_WEBHOOK_SECRET
+#   OPERITAS_SPACELIFT_WEBHOOK_SECRET
+#   OPERITAS_GRAFANA_WEBHOOK_SECRET
+#   OPERITAS_REDACT_HASH_KEY (required when redact.hashPii is true)
 secretName: "collector-secrets"
 
 # PII redaction policy. Default: hard redact (strip the field entirely).

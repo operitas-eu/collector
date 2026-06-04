@@ -1,0 +1,20 @@
+{
+  "action": "Create",
+  "alert": {
+    "alertId": "06b70c67-8f9a-4d1c-b4e7-3abc00000001-1717000000000",
+    "message": "High CPU usage on web-eu-1",
+    "alias": "cpu-alert-web-eu-1",
+    "tinyId": "42",
+    "priority": "P2",
+    "status": "open",
+    "owner": "ops-team",
+    "responders": ["ops-team"],
+    "tags": ["env:prod", "team:platform"],
+    "createdAt": 1717000000000,
+    "updatedAt": 1717000010000,
+    "source": "prometheus"
+  },
+  "source": {
+    "name": "monitor-bot"
+  }
+}

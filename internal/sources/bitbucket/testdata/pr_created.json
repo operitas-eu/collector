@@ -1,0 +1,37 @@
+{
+  "repository": {
+    "full_name": "acme/backend",
+    "name": "backend"
+  },
+  "pullrequest": {
+    "id": 42,
+    "title": "Add rate limiting middleware",
+    "state": "OPEN",
+    "created_on": "2026-05-20T08:00:00.000000Z",
+    "updated_on": "2026-05-20T08:05:00.000000Z",
+    "author": {
+      "display_name": "Jane Dev",
+      "nickname": "janedev"
+    },
+    "source": {
+      "branch": {
+        "name": "feature/rate-limit"
+      },
+      "repository": {
+        "full_name": "acme/backend"
+      }
+    },
+    "destination": {
+      "branch": {
+        "name": "main"
+      },
+      "repository": {
+        "full_name": "acme/backend"
+      }
+    }
+  },
+  "actor": {
+    "display_name": "Jane Dev",
+    "nickname": "janedev"
+  }
+}

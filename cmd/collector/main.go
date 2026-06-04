@@ -2,16 +2,22 @@
 // It runs inside the customer's infrastructure and ships normalized events
 // to the Operitas control plane via mTLS.
 //
-// The collector never writes to customer systems. It only reads:
-//   - AWS S3 (CloudTrail log files) via s3:ListObjectsV2 + s3:GetObject
-//   - Azure Activity Logs via Azure Monitor ARM read API
-//   - GitHub REST API (PRs, deployments) via GET endpoints
-//   - GitHub webhook payloads (passive HTTP listener)
-//   - PagerDuty webhook payloads (passive HTTP listener)
-//
-// All disk writes are scoped to /var/lib/operitas/ (WAL and cursor state).
-// Logs are JSON to stdout; the container runtime handles capture and rotation.
+// The collector never writes to customer systems. It only reads via GET
+// endpoints or passive webhook receivers. All disk writes are scoped to
+// /var/lib/operitas/ (WAL and cursor state). Logs are JSON to stdout.
 // Prometheus metrics are exposed on :9090/metrics.
+//
+// Sources (16 total):
+//
+//	Existing:  aws.cloudtrail, azure.activity, github, gitlab, pagerduty
+//	Fully impl: jira, datadog, prometheus
+//	Stubs:     bitbucket, flux, spacelift, incident.io, opsgenie, grafana, servicenow, argocd
+//
+// Webhook routing: github (port 8081), gitlab (port 8083), pagerduty (port 8082)
+// continue on their dedicated ports. All new sources share a single webhook
+// server on WEBHOOK_PORT (default 8090, config key sources.shared_webhook_port).
+// See internal/sources/CONTRACT.md and helm/collector/README.md for the
+// transitional state and migration plan.
 package main
 
 import (
@@ -29,11 +35,23 @@ import (
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
 	"operitas.eu/collector/internal/redact"
+	internalrt "operitas.eu/collector/internal/runtime"
+	"operitas.eu/collector/internal/sources/argocd"
 	"operitas.eu/collector/internal/sources/awscloudtrail"
 	"operitas.eu/collector/internal/sources/azureactivity"
+	"operitas.eu/collector/internal/sources/bitbucket"
+	"operitas.eu/collector/internal/sources/datadog"
+	"operitas.eu/collector/internal/sources/flux"
 	"operitas.eu/collector/internal/sources/github"
 	"operitas.eu/collector/internal/sources/gitlab"
+	"operitas.eu/collector/internal/sources/grafana"
+	"operitas.eu/collector/internal/sources/incidentio"
+	"operitas.eu/collector/internal/sources/jira"
+	"operitas.eu/collector/internal/sources/opsgenie"
 	"operitas.eu/collector/internal/sources/pagerduty"
+	"operitas.eu/collector/internal/sources/prometheus"
+	"operitas.eu/collector/internal/sources/servicenow"
+	"operitas.eu/collector/internal/sources/spacelift"
 	"operitas.eu/collector/internal/transport"
 )
 
@@ -240,6 +258,142 @@ func main() {
 		}()
 	}
 
+	// Shared webhook router for all new sources (port 8090 by default).
+	// github/gitlab/pagerduty retain their own dedicated ports in this release.
+	sharedRouter := internalrt.NewSharedWebhookRouter(cfg.Sources.SharedWebhookPort)
+	sharedRouterHasHandlers := false
+
+	if cfg.Sources.Jira.Enabled {
+		j := jira.New(cfg.Sources.Jira, r, emit)
+		j.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		if cfg.Sources.Jira.Token != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := j.RunPoller(ctx); err != nil {
+					slog.Error("jira poller exited with error", "err", err)
+				}
+			}()
+		}
+	}
+
+	if cfg.Sources.Datadog.Enabled {
+		dd := datadog.New(cfg.Sources.Datadog, r, emit)
+		dd.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		if cfg.Sources.Datadog.APIKey != "" && cfg.Sources.Datadog.AppKey != "" {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := dd.RunPoller(ctx); err != nil {
+					slog.Error("datadog poller exited with error", "err", err)
+				}
+			}()
+		}
+	}
+
+	if cfg.Sources.Prometheus.Enabled {
+		prom := prometheus.New(cfg.Sources.Prometheus, r, emit)
+		prom.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+	}
+
+	if cfg.Sources.Bitbucket.Enabled {
+		bb := bitbucket.New(cfg.Sources.Bitbucket, r, emit)
+		bb.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := bb.RunPoller(ctx); err != nil {
+				slog.Error("bitbucket poller exited with error", "err", err)
+			}
+		}()
+	}
+
+	if cfg.Sources.IncidentIO.Enabled {
+		inc := incidentio.New(cfg.Sources.IncidentIO, r, emit)
+		inc.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := inc.RunPoller(ctx); err != nil {
+				slog.Error("incidentio poller exited with error", "err", err)
+			}
+		}()
+	}
+
+	if cfg.Sources.Opsgenie.Enabled {
+		og := opsgenie.New(cfg.Sources.Opsgenie, r, emit)
+		og.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := og.RunPoller(ctx); err != nil {
+				slog.Error("opsgenie poller exited with error", "err", err)
+			}
+		}()
+	}
+
+	if cfg.Sources.ServiceNow.Enabled {
+		sn := servicenow.New(cfg.Sources.ServiceNow, r, emit)
+		sn.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sn.RunPoller(ctx); err != nil {
+				slog.Error("servicenow poller exited with error", "err", err)
+			}
+		}()
+	}
+
+	if cfg.Sources.ArgoCD.Enabled {
+		acd := argocd.New(cfg.Sources.ArgoCD, r, emit)
+		acd.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := acd.RunPoller(ctx); err != nil {
+				slog.Error("argocd poller exited with error", "err", err)
+			}
+		}()
+	}
+
+	if cfg.Sources.Flux.Enabled {
+		fl := flux.New(cfg.Sources.Flux, r, emit)
+		fl.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+	}
+
+	if cfg.Sources.Spacelift.Enabled {
+		sl := spacelift.New(cfg.Sources.Spacelift, r, emit)
+		sl.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+	}
+
+	if cfg.Sources.Grafana.Enabled {
+		gr := grafana.New(cfg.Sources.Grafana, r, emit)
+		gr.Register(sharedRouter)
+		sharedRouterHasHandlers = true
+	}
+
+	// Start the shared router only if at least one source registered a handler.
+	// This avoids opening an unnecessary port when no new sources are enabled.
+	if sharedRouterHasHandlers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := sharedRouter.Run(ctx); err != nil {
+				slog.Error("shared webhook router exited with error", "err", err)
+			}
+		}()
+	}
+
 	// Metrics server on a dedicated port. NetworkPolicy restricts access to
 	// within-cluster Prometheus scrapers only.
 	metricsMux := http.NewServeMux()
@@ -266,6 +420,18 @@ func main() {
 		"github_enabled", cfg.Sources.GitHub.Enabled,
 		"gitlab_enabled", cfg.Sources.GitLab.Enabled,
 		"pagerduty_enabled", cfg.Sources.PagerDuty.Enabled,
+		"jira_enabled", cfg.Sources.Jira.Enabled,
+		"datadog_enabled", cfg.Sources.Datadog.Enabled,
+		"prometheus_enabled", cfg.Sources.Prometheus.Enabled,
+		"bitbucket_enabled", cfg.Sources.Bitbucket.Enabled,
+		"incidentio_enabled", cfg.Sources.IncidentIO.Enabled,
+		"opsgenie_enabled", cfg.Sources.Opsgenie.Enabled,
+		"servicenow_enabled", cfg.Sources.ServiceNow.Enabled,
+		"argocd_enabled", cfg.Sources.ArgoCD.Enabled,
+		"flux_enabled", cfg.Sources.Flux.Enabled,
+		"spacelift_enabled", cfg.Sources.Spacelift.Enabled,
+		"grafana_enabled", cfg.Sources.Grafana.Enabled,
+		"shared_webhook_port", cfg.Sources.SharedWebhookPort,
 	)
 
 	<-ctx.Done()

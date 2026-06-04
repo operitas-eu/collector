@@ -1,0 +1,15 @@
+{
+  "app": "platform-api",
+  "namespace": "production",
+  "project": "platform",
+  "repo": "https://git.example.eu/platform/k8s-config",
+  "revision": "abc1234def5678",
+  "sync_status": "Synced",
+  "health_status": "Healthy",
+  "operation_phase": "Succeeded",
+  "operation_message": "successfully synced (all tasks run)",
+  "initiator": "alice@example.eu",
+  "timestamp": "2026-06-01T14:22:00Z",
+  "dest_namespace": "production",
+  "target_revision": "main"
+}

@@ -1,0 +1,24 @@
+{
+  "state": "FINISHED",
+  "stateVersion": 3,
+  "timestamp": 1715077200,
+  "outcome": "success",
+  "run": {
+    "id": "01JXXXXXXXXXXXXXXXXX",
+    "type": "TRACKED",
+    "triggeredBy": "alice@example.com",
+    "commit": {
+      "authorName": "Alice Smith",
+      "authorLogin": "alice",
+      "hash": "abc123def456",
+      "message": "chore: bump terraform provider version"
+    }
+  },
+  "stack": {
+    "id": "platform-infra",
+    "name": "Platform Infrastructure",
+    "spaceDetails": {
+      "id": "root"
+    }
+  }
+}
