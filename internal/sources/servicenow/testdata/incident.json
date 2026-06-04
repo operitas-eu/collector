@@ -1,0 +1,19 @@
+{
+  "sys_id": "inc987fed654inc987fed654inc98765",
+  "number": "INC0010042",
+  "sys_class_name": "incident",
+  "state": "1",
+  "state_label": "New",
+  "short_description": "Production API returning 500 errors",
+  "sys_updated_on": "2026-05-20 09:15:00",
+  "opened_by": {
+    "display_value": "alice.martin@example.com",
+    "link": "https://example.service-now.com/api/now/table/sys_user/user003"
+  },
+  "assigned_to": {
+    "display_value": "bob.jones@example.com",
+    "link": "https://example.service-now.com/api/now/table/sys_user/user004"
+  },
+  "priority": "1",
+  "category": "Software"
+}

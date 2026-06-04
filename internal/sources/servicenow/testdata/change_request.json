@@ -1,0 +1,19 @@
+{
+  "sys_id": "abc123def456abc123def456abc12345",
+  "number": "CHG0030001",
+  "sys_class_name": "change_request",
+  "state": "3",
+  "state_label": "Authorize",
+  "short_description": "Upgrade database cluster to v15",
+  "sys_updated_on": "2026-05-20 14:32:00",
+  "opened_by": {
+    "display_value": "jane.doe@example.com",
+    "link": "https://example.service-now.com/api/now/table/sys_user/user001"
+  },
+  "assigned_to": {
+    "display_value": "john.smith@example.com",
+    "link": "https://example.service-now.com/api/now/table/sys_user/user002"
+  },
+  "priority": "2",
+  "category": "Software"
+}

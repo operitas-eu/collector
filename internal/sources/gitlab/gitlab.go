@@ -271,8 +271,8 @@ func (s *Source) getJSON(ctx context.Context, path string, out any) (int, error)
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return 0, fmt.Errorf("gitlab GET %s: status %d: %s", path, resp.StatusCode, string(body))
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return 0, fmt.Errorf("gitlab GET %s: unexpected status %d (response body omitted)", path, resp.StatusCode)
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {

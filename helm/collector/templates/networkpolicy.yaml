@@ -17,12 +17,16 @@ spec:
 
   ingress:
     # Allow webhook traffic from within the cluster (ingress controller or VPN).
+    # Includes: github (8081), pagerduty (8082), gitlab (8083) on dedicated ports,
+    # and the shared webhook router (8090) for all new sources.
     - ports:
         - port: {{ .Values.ports.githubWebhook }}
           protocol: TCP
         - port: {{ .Values.ports.gitlabWebhook }}
           protocol: TCP
         - port: {{ .Values.ports.pagerdutyWebhook }}
+          protocol: TCP
+        - port: {{ .Values.ports.sharedWebhook }}
           protocol: TCP
       {{- if .Values.networkPolicy.ingressCidr }}
       from:

@@ -37,11 +37,21 @@ const (
 	SourceGitHub        EventSource = "github"
 	SourceGitLab        EventSource = "gitlab"
 	SourcePagerDuty     EventSource = "pagerduty"
-	SourceDatadog       EventSource = "datadog"
-	SourceJira          EventSource = "jira"
-	SourceArgoCD        EventSource = "argocd"
-	SourceK8sAudit      EventSource = "k8s.audit"
-	SourceVendorStatus  EventSource = "vendor.statuspage"
+	// Existing sources with full implementations (see internal/sources/).
+	SourceDatadog      EventSource = "datadog"
+	SourceJira         EventSource = "jira"
+	SourceArgoCD       EventSource = "argocd"
+	SourceK8sAudit     EventSource = "k8s.audit"
+	SourceVendorStatus EventSource = "vendor.statuspage"
+	// New sources added in the 11-source integration batch.
+	SourceBitbucket  EventSource = "bitbucket"
+	SourceFlux       EventSource = "flux"
+	SourceSpacelift  EventSource = "spacelift"
+	SourceIncidentIO EventSource = "incident.io"
+	SourceOpsgenie   EventSource = "opsgenie"
+	SourceGrafana    EventSource = "grafana"
+	SourcePrometheus EventSource = "prometheus"
+	SourceServiceNow EventSource = "servicenow"
 )
 
 // eventTypePattern matches the pattern from the JSON schema:
@@ -60,6 +70,14 @@ var validSources = map[EventSource]struct{}{
 	SourceArgoCD:        {},
 	SourceK8sAudit:      {},
 	SourceVendorStatus:  {},
+	SourceBitbucket:     {},
+	SourceFlux:          {},
+	SourceSpacelift:     {},
+	SourceIncidentIO:    {},
+	SourceOpsgenie:      {},
+	SourceGrafana:       {},
+	SourcePrometheus:    {},
+	SourceServiceNow:    {},
 }
 
 // Event is a single normalized event item.

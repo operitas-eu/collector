@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -85,6 +87,27 @@ type SourcesConfig struct {
 	GitHub        GitHubConfig        `yaml:"github"`
 	GitLab        GitLabConfig        `yaml:"gitlab"`
 	PagerDuty     PagerDutyConfig     `yaml:"pagerduty"`
+
+	// New hybrid sources (webhook + optional REST poller).
+	Jira       JiraConfig       `yaml:"jira"`
+	Datadog    DatadogConfig    `yaml:"datadog"`
+	Bitbucket  BitbucketConfig  `yaml:"bitbucket"`
+	IncidentIO IncidentIOConfig `yaml:"incident_io"`
+	Opsgenie   OpsgenieConfig   `yaml:"opsgenie"`
+	ServiceNow ServiceNowConfig `yaml:"servicenow"`
+	ArgoCD     ArgoCDConfig     `yaml:"argocd"`
+
+	// New webhook-only sources (push-only platforms, no REST poller).
+	Prometheus PrometheusConfig `yaml:"prometheus"`
+	Flux       FluxConfig       `yaml:"flux"`
+	Spacelift  SpaceliftConfig  `yaml:"spacelift"`
+	Grafana    GrafanaConfig    `yaml:"grafana"`
+
+	// SharedWebhookPort is the port all new webhook sources share.
+	// Existing github/gitlab/pagerduty keep their own dedicated ports
+	// until an explicit migration step is taken.
+	// Default: 8090.
+	SharedWebhookPort int `yaml:"shared_webhook_port"`
 }
 
 // CloudTrailConfig configures the AWS CloudTrail S3 reader.
@@ -237,6 +260,391 @@ type PagerDutyConfig struct {
 	SigningSecret string `yaml:"-"`
 }
 
+// JiraConfig configures the Jira event source (webhook + REST poller).
+//
+// Webhook: Jira sends a POST with a shared secret in the X-Hub-Signature-256 header
+// (or older deployments use a plain token in Authorization). The collector verifies
+// it with sigverify.SecretEqual (plain equality, as Jira does not HMAC-sign payloads
+// by default; the webhook secret is sent verbatim in the Authorization header as
+// "Bearer <secret>"). Operators using Jira Automation rule webhooks should set
+// WebhookSecret to the value configured in the Automation rule.
+//
+// REST poller: GET /rest/api/3/search (JQL ordered by updated desc) to backfill
+// issues when webhooks are unavailable. EU-only: BaseURL must not resolve to a
+// non-EU Atlassian Cloud host. Self-hosted Jira operators must provide an EU
+// BaseURL. For Atlassian Cloud, the EU tenant URL pattern is:
+//
+//	https://<tenant>.atlassian.net  (data residency enforced by tenant config)
+//
+// The poller emits events only for issues updated since the last cursor.
+type JiraConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// BaseURL is the Jira API root, e.g. "https://mycompany.atlassian.net"
+	// or "https://jira.example.eu" for self-hosted. Validated against
+	// isKnownNonEUEndpoint at startup.
+	BaseURL string `yaml:"base_url"`
+
+	// WebhookSecret is the shared secret verified in the Authorization header
+	// ("Bearer <secret>"). Delivered via OPERITAS_JIRA_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// Token is a Jira API token (Atlassian API token or PAT for self-hosted).
+	// Required for the REST poller. Delivered via OPERITAS_JIRA_TOKEN.
+	// Scopes needed: read:jira-work (Atlassian Cloud) or Browse Projects (server).
+	Token string `yaml:"-"`
+
+	// Projects is an optional list of Jira project keys (e.g. ["OPS", "INFRA"])
+	// to restrict webhook events and polling. If empty, all projects are observed.
+	Projects []string `yaml:"projects"`
+
+	// JQLFilter is an optional additional JQL clause appended to the poller's
+	// query (e.g. "issuetype = Story"). Default: no extra filter.
+	JQLFilter string `yaml:"jql_filter"`
+
+	// PollInterval controls how often the REST API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// PollLookback is the time window used on the first poll when no cursor exists.
+	PollLookback time.Duration `yaml:"poll_lookback"`
+
+	// CursorPath is where the last-seen issue updated timestamp is persisted.
+	// Defaults to DataDir/jira_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// DatadogConfig configures the Datadog event source (webhook + Events REST poller).
+//
+// Webhook: Datadog sends an application/json POST. The shared secret is sent in
+// the DD-API-KEY header (constant-time equality check via sigverify.SecretEqual).
+// The collector verifies this header before processing.
+//
+// REST poller: GET https://api.datadoghq.eu/api/v1/events (EU endpoint only).
+// Auth: DD-API-KEY and DD-APPLICATION-KEY headers. The collector validates that
+// the configured APIBaseURL does not resolve to a non-EU Datadog region.
+// Datadog EU API: https://api.datadoghq.eu
+type DatadogConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// APIBaseURL is the Datadog API base URL. Must be an EU endpoint.
+	// Default: "https://api.datadoghq.eu"
+	// Accepted alternatives: "https://api.eu1.datadoghq.com"
+	// Non-EU URLs (api.datadoghq.com, api.us3.datadoghq.com, etc.) are rejected
+	// at startup.
+	APIBaseURL string `yaml:"api_base_url"`
+
+	// WebhookSecret is the shared secret verified in the DD-API-KEY header.
+	// Delivered via OPERITAS_DATADOG_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// APIKey is the Datadog API key for the REST poller.
+	// Delivered via OPERITAS_DATADOG_TOKEN (we follow the OPERITAS_<SOURCE>_TOKEN
+	// convention even though Datadog calls it an API key).
+	APIKey string `yaml:"-"`
+
+	// AppKey is the Datadog Application key (required for the Events API).
+	// Delivered via OPERITAS_DATADOG_APP_KEY.
+	AppKey string `yaml:"-"`
+
+	// PollInterval controls how often the Events API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// PollLookback is the time window used on the first poll when no cursor exists.
+	PollLookback time.Duration `yaml:"poll_lookback"`
+
+	// CursorPath is where the last-seen event timestamp is persisted.
+	// Defaults to DataDir/datadog_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// PrometheusConfig configures the Prometheus Alertmanager webhook receiver.
+//
+// Prometheus Alertmanager fires a POST to the collector's webhook endpoint when
+// an alert fires or resolves. The collector supports two auth schemes, configurable
+// via AuthScheme:
+//
+//   - "bearer": Authorization header is "Bearer <WebhookSecret>"
+//   - "basic":  Authorization header is "Basic base64(<BasicUser>:<WebhookSecret>)"
+//
+// No REST poller: Prometheus/Alertmanager is push-only; the collector is purely
+// a passive receiver.
+//
+// Reference: https://prometheus.io/docs/alerting/latest/configuration/#webhook_config
+type PrometheusConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// WebhookSecret is the bearer token or password (for basic auth).
+	// Delivered via OPERITAS_PROMETHEUS_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// AuthScheme controls how the Authorization header is validated.
+	// Valid values: "bearer" (default), "basic", "none".
+	// "none" disables auth checking — use only in fully private network segments.
+	AuthScheme string `yaml:"auth_scheme"`
+
+	// BasicUser is the expected username for basic auth mode.
+	// Ignored unless AuthScheme is "basic".
+	BasicUser string `yaml:"basic_user"`
+}
+
+// BitbucketConfig configures the Bitbucket event source (webhook + REST poller).
+//
+// Webhook: Bitbucket signs with HMAC-SHA256; the signature is in the
+// X-Hub-Signature-256 header with "sha256=" prefix (same scheme as GitHub).
+// Verify with sigverify.HexHMACPrefixed(..., "sha256=").
+//
+// REST poller: Bitbucket Cloud REST API v2 — GET /repositories/{workspace}/{repo}/pullrequests
+// and /deployments. Requires OAuth2 client credentials (not stored in YAML).
+// BaseURL for Cloud: "https://api.bitbucket.org/2.0" — this is a global endpoint;
+// Bitbucket does not offer EU-region-specific API endpoints. Flag with a comment
+// in the implementation: this is acceptable because it is a metadata/audit API,
+// not a customer-data-storage API. The poller is hybrid but the EU-only rule
+// applies strictly to customer data at rest.
+type BitbucketConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// BaseURL is the Bitbucket API root. Default: "https://api.bitbucket.org/2.0".
+	// For Bitbucket Data Center (self-hosted EU instance), set to
+	// "https://bitbucket.example.eu/rest/api/1.0".
+	BaseURL string `yaml:"base_url"`
+
+	// WebhookSecret is the HMAC-SHA256 secret shared with Bitbucket.
+	// Delivered via OPERITAS_BITBUCKET_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// Token is the OAuth2 access token or HTTP access token for the REST poller.
+	// Delivered via OPERITAS_BITBUCKET_TOKEN.
+	Token string `yaml:"-"`
+
+	// Workspace is the Bitbucket workspace (Cloud) or project key (Data Center)
+	// to watch. Required for the REST poller.
+	Workspace string `yaml:"workspace"`
+
+	// Repos is an optional list of repository slugs to watch. If empty, all
+	// repos in the workspace are polled.
+	Repos []string `yaml:"repos"`
+
+	// PollInterval controls how often the REST API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// CursorPath is where the last-seen event timestamp is persisted.
+	// Defaults to DataDir/bitbucket_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// IncidentIOConfig configures the incident.io event source (webhook + REST poller).
+//
+// Webhook: incident.io signs payloads with HMAC-SHA256; the signature is in the
+// X-Signature-256 header with "sha256=" prefix.
+// Reference: https://api-docs.incident.io/tag/Webhook-HTTP-Endpoints
+//
+// REST poller: GET https://api.incident.io/v2/incidents (EU-hosted SaaS).
+// Auth: Bearer token in Authorization header.
+type IncidentIOConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// APIBaseURL is the incident.io API base. Default: "https://api.incident.io/v2".
+	// incident.io is EU-hosted SaaS; this URL must not be changed to a non-EU host.
+	APIBaseURL string `yaml:"api_base_url"`
+
+	// WebhookSecret is the HMAC-SHA256 secret configured on the incident.io webhook.
+	// Delivered via OPERITAS_INCIDENTIO_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// Token is the API token for the REST poller.
+	// Delivered via OPERITAS_INCIDENTIO_TOKEN.
+	Token string `yaml:"-"`
+
+	// PollInterval controls how often the incidents API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// PollLookback is the time window used on the first poll when no cursor exists.
+	PollLookback time.Duration `yaml:"poll_lookback"`
+
+	// CursorPath is where the last-seen incident update timestamp is persisted.
+	// Defaults to DataDir/incidentio_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// OpsgenieConfig configures the Opsgenie event source (webhook + REST poller).
+//
+// Webhook: Opsgenie sends a POST with the shared secret in the
+// X-OG-Webhook-Secret header (plain-secret equality).
+// Reference: https://support.atlassian.com/opsgenie/docs/outgoing-webhook-settings/
+//
+// REST poller: GET https://api.eu.opsgenie.com/v2/alerts (EU endpoint required).
+// Auth: GenieKey header.
+type OpsgenieConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// APIBaseURL is the Opsgenie API base URL. Must be the EU endpoint.
+	// Default: "https://api.eu.opsgenie.com/v2"
+	// Non-EU URL (api.opsgenie.com) is rejected at startup.
+	APIBaseURL string `yaml:"api_base_url"`
+
+	// WebhookSecret is the shared secret verified in the X-OG-Webhook-Secret header.
+	// Delivered via OPERITAS_OPSGENIE_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// Token is the Opsgenie API key ("GenieKey") for the REST poller.
+	// Delivered via OPERITAS_OPSGENIE_TOKEN.
+	Token string `yaml:"-"`
+
+	// PollInterval controls how often the alerts API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// PollLookback is the time window used on the first poll when no cursor exists.
+	PollLookback time.Duration `yaml:"poll_lookback"`
+
+	// CursorPath is where the last-seen alert creation timestamp is persisted.
+	// Defaults to DataDir/opsgenie_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// ServiceNowConfig configures the ServiceNow event source (webhook + REST poller).
+//
+// Webhook: ServiceNow Business Rules or Flow Designer sends a POST to the
+// collector's webhook endpoint. The shared secret is sent in the
+// X-ServiceNow-Webhook-Secret header (plain-secret equality).
+//
+// REST poller: GET /api/now/table/change_request (Change Management table).
+// Auth: HTTP Basic or OAuth2 bearer token. The collector supports both;
+// BasicUser + WebhookSecret (as password) for Basic, or Token for Bearer.
+// BaseURL must be the customer's EU-resident ServiceNow instance
+// (e.g. "https://mycompany.service-now.com"). The collector validates this
+// against isKnownNonEUEndpoint; self-hosted EU operators must ensure their
+// instance is EU-resident.
+type ServiceNowConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// BaseURL is the ServiceNow instance root, e.g.
+	// "https://mycompany.service-now.com".
+	// Validated against isKnownNonEUEndpoint at startup.
+	BaseURL string `yaml:"base_url"`
+
+	// WebhookSecret is the shared secret verified in the
+	// X-ServiceNow-Webhook-Secret header (also used as password for basic auth).
+	// Delivered via OPERITAS_SERVICENOW_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// Token is the OAuth2 bearer token for the REST poller.
+	// When set, bearer auth is used instead of basic auth.
+	// Delivered via OPERITAS_SERVICENOW_TOKEN.
+	Token string `yaml:"-"`
+
+	// BasicUser is the username for HTTP basic auth (poller only).
+	// Used when Token is empty. Default: "collector".
+	BasicUser string `yaml:"basic_user"`
+
+	// Tables is the list of ServiceNow table names to poll.
+	// Default: ["change_request"].
+	Tables []string `yaml:"tables"`
+
+	// PollInterval controls how often the ServiceNow table API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// PollLookback is the time window used on the first poll when no cursor exists.
+	PollLookback time.Duration `yaml:"poll_lookback"`
+
+	// CursorPath is where the last-seen record sys_updated_on timestamp is persisted.
+	// Defaults to DataDir/servicenow_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// ArgoCDConfig configures the Argo CD event source (webhook + REST poller).
+//
+// Webhook: Argo CD can be configured to send webhook events (shared secret
+// in the X-ArgoCD-Token header, plain-secret equality).
+// Reference: https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/
+//
+// REST poller: GET https://<argocd-server>/api/v1/applications (read-only).
+// Auth: Bearer token (argocd CLI token or OIDC token). Requires the
+// applications.get permission.
+// BaseURL is the customer's Argo CD server URL (e.g. "https://argocd.example.eu").
+// Validated against isKnownNonEUEndpoint at startup.
+type ArgoCDConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// BaseURL is the Argo CD API server root, e.g. "https://argocd.example.eu".
+	// Validated against isKnownNonEUEndpoint at startup.
+	BaseURL string `yaml:"base_url"`
+
+	// WebhookSecret is the shared secret verified in the X-ArgoCD-Token header.
+	// Delivered via OPERITAS_ARGOCD_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+
+	// Token is a bearer token for the REST poller (argocd account token or OIDC).
+	// Delivered via OPERITAS_ARGOCD_TOKEN.
+	Token string `yaml:"-"`
+
+	// Namespace is the Kubernetes namespace where Argo CD is installed.
+	// Used to construct resource identifiers in events. Default: "argocd".
+	Namespace string `yaml:"namespace"`
+
+	// AppSelector is an optional label selector to restrict which Argo CD
+	// Applications are polled (e.g. "team=platform"). If empty, all applications
+	// the token has access to are polled.
+	AppSelector string `yaml:"app_selector"`
+
+	// PollInterval controls how often the Argo CD applications API is polled.
+	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// CursorPath is where the last-seen application sync timestamp is persisted.
+	// Defaults to DataDir/argocd_cursor.
+	CursorPath string `yaml:"cursor_path"`
+}
+
+// FluxConfig configures the Flux CD event source (webhook-only, push model).
+//
+// Flux CD's notification controller sends events to external receivers via the
+// Alert/Provider API. The collector acts as a generic webhook receiver.
+// Auth: shared secret in the Gotk-Webhook-Secret header (constant-time equality).
+// Reference: https://fluxcd.io/flux/components/notification/receivers/
+//
+// No REST poller: Flux does not expose a push-event history API. Operators
+// wanting backfill must replay from the Kubernetes event log using a separate tool.
+type FluxConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// WebhookSecret is the shared secret configured in the Flux Receiver object.
+	// Delivered via OPERITAS_FLUX_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+}
+
+// SpaceliftConfig configures the Spacelift event source (webhook-only, push model).
+//
+// Spacelift can deliver webhook events on stack run state changes.
+// The payload is signed with HMAC-SHA256; the signature is in the
+// X-Signature-256 header with "sha256=" prefix.
+// Reference: https://docs.spacelift.io/integrations/webhooks
+//
+// No REST poller: Spacelift's REST API is not publicly documented as stable
+// for event history retrieval.
+type SpaceliftConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// WebhookSecret is the HMAC-SHA256 secret configured in the Spacelift webhook.
+	// Delivered via OPERITAS_SPACELIFT_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+}
+
+// GrafanaConfig configures the Grafana event source (webhook-only, push model).
+//
+// Grafana Alerting sends webhook notifications when alert states change.
+// The shared secret is sent in the Authorization header as "Bearer <secret>"
+// (constant-time equality via sigverify.SecretEqual).
+// Reference: https://grafana.com/docs/grafana/latest/alerting/configure-notifications/webhook-notifier/
+//
+// No REST poller: Grafana does not expose a stable alerts-history REST API
+// suitable for event backfill. Use the webhook as the primary signal.
+type GrafanaConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// WebhookSecret is the shared secret verified in the Authorization header.
+	// Delivered via OPERITAS_GRAFANA_WEBHOOK_SECRET.
+	WebhookSecret string `yaml:"-"`
+}
+
 // RedactConfig controls PII handling across all sources.
 type RedactConfig struct {
 	// HashPII, when true, replaces PII with a keyed HMAC-SHA256 hex string rather
@@ -336,6 +744,98 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sources.PagerDuty.WebhookPort == 0 {
 		cfg.Sources.PagerDuty.WebhookPort = 8082
 	}
+	if cfg.Sources.SharedWebhookPort == 0 {
+		cfg.Sources.SharedWebhookPort = 8090
+	}
+	// Jira defaults.
+	if cfg.Sources.Jira.PollInterval == 0 {
+		cfg.Sources.Jira.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.Jira.PollLookback == 0 {
+		cfg.Sources.Jira.PollLookback = 1 * time.Hour
+	}
+	if cfg.Sources.Jira.CursorPath == "" {
+		cfg.Sources.Jira.CursorPath = DataDir + "/jira_cursor"
+	}
+	// Datadog defaults.
+	if cfg.Sources.Datadog.APIBaseURL == "" {
+		cfg.Sources.Datadog.APIBaseURL = "https://api.datadoghq.eu"
+	}
+	if cfg.Sources.Datadog.PollInterval == 0 {
+		cfg.Sources.Datadog.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.Datadog.PollLookback == 0 {
+		cfg.Sources.Datadog.PollLookback = 1 * time.Hour
+	}
+	if cfg.Sources.Datadog.CursorPath == "" {
+		cfg.Sources.Datadog.CursorPath = DataDir + "/datadog_cursor"
+	}
+	// Prometheus defaults.
+	if cfg.Sources.Prometheus.AuthScheme == "" {
+		cfg.Sources.Prometheus.AuthScheme = "bearer"
+	}
+	// Bitbucket defaults.
+	if cfg.Sources.Bitbucket.BaseURL == "" {
+		cfg.Sources.Bitbucket.BaseURL = "https://api.bitbucket.org/2.0"
+	}
+	if cfg.Sources.Bitbucket.PollInterval == 0 {
+		cfg.Sources.Bitbucket.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.Bitbucket.CursorPath == "" {
+		cfg.Sources.Bitbucket.CursorPath = DataDir + "/bitbucket_cursor"
+	}
+	// incident.io defaults.
+	if cfg.Sources.IncidentIO.APIBaseURL == "" {
+		cfg.Sources.IncidentIO.APIBaseURL = "https://api.incident.io/v2"
+	}
+	if cfg.Sources.IncidentIO.PollInterval == 0 {
+		cfg.Sources.IncidentIO.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.IncidentIO.PollLookback == 0 {
+		cfg.Sources.IncidentIO.PollLookback = 1 * time.Hour
+	}
+	if cfg.Sources.IncidentIO.CursorPath == "" {
+		cfg.Sources.IncidentIO.CursorPath = DataDir + "/incidentio_cursor"
+	}
+	// Opsgenie defaults.
+	if cfg.Sources.Opsgenie.APIBaseURL == "" {
+		cfg.Sources.Opsgenie.APIBaseURL = "https://api.eu.opsgenie.com/v2"
+	}
+	if cfg.Sources.Opsgenie.PollInterval == 0 {
+		cfg.Sources.Opsgenie.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.Opsgenie.PollLookback == 0 {
+		cfg.Sources.Opsgenie.PollLookback = 1 * time.Hour
+	}
+	if cfg.Sources.Opsgenie.CursorPath == "" {
+		cfg.Sources.Opsgenie.CursorPath = DataDir + "/opsgenie_cursor"
+	}
+	// ServiceNow defaults.
+	if cfg.Sources.ServiceNow.BasicUser == "" {
+		cfg.Sources.ServiceNow.BasicUser = "collector"
+	}
+	if len(cfg.Sources.ServiceNow.Tables) == 0 {
+		cfg.Sources.ServiceNow.Tables = []string{"change_request"}
+	}
+	if cfg.Sources.ServiceNow.PollInterval == 0 {
+		cfg.Sources.ServiceNow.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.ServiceNow.PollLookback == 0 {
+		cfg.Sources.ServiceNow.PollLookback = 1 * time.Hour
+	}
+	if cfg.Sources.ServiceNow.CursorPath == "" {
+		cfg.Sources.ServiceNow.CursorPath = DataDir + "/servicenow_cursor"
+	}
+	// ArgoCD defaults.
+	if cfg.Sources.ArgoCD.Namespace == "" {
+		cfg.Sources.ArgoCD.Namespace = "argocd"
+	}
+	if cfg.Sources.ArgoCD.PollInterval == 0 {
+		cfg.Sources.ArgoCD.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.ArgoCD.CursorPath == "" {
+		cfg.Sources.ArgoCD.CursorPath = DataDir + "/argocd_cursor"
+	}
 	if cfg.Metrics.Port == 0 {
 		cfg.Metrics.Port = 9090
 	}
@@ -365,6 +865,64 @@ func populateSecrets(cfg *Config) {
 	}
 	if v := os.Getenv("OPERITAS_REDACT_HASH_KEY"); v != "" {
 		cfg.Redact.HashKey = v
+	}
+	// New source secrets.
+	if v := os.Getenv("OPERITAS_JIRA_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Jira.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_JIRA_TOKEN"); v != "" {
+		cfg.Sources.Jira.Token = v
+	}
+	if v := os.Getenv("OPERITAS_DATADOG_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Datadog.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_DATADOG_TOKEN"); v != "" {
+		cfg.Sources.Datadog.APIKey = v
+	}
+	if v := os.Getenv("OPERITAS_DATADOG_APP_KEY"); v != "" {
+		cfg.Sources.Datadog.AppKey = v
+	}
+	if v := os.Getenv("OPERITAS_PROMETHEUS_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Prometheus.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_BITBUCKET_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Bitbucket.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_BITBUCKET_TOKEN"); v != "" {
+		cfg.Sources.Bitbucket.Token = v
+	}
+	if v := os.Getenv("OPERITAS_INCIDENTIO_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.IncidentIO.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_INCIDENTIO_TOKEN"); v != "" {
+		cfg.Sources.IncidentIO.Token = v
+	}
+	if v := os.Getenv("OPERITAS_OPSGENIE_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Opsgenie.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_OPSGENIE_TOKEN"); v != "" {
+		cfg.Sources.Opsgenie.Token = v
+	}
+	if v := os.Getenv("OPERITAS_SERVICENOW_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.ServiceNow.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_SERVICENOW_TOKEN"); v != "" {
+		cfg.Sources.ServiceNow.Token = v
+	}
+	if v := os.Getenv("OPERITAS_ARGOCD_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.ArgoCD.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_ARGOCD_TOKEN"); v != "" {
+		cfg.Sources.ArgoCD.Token = v
+	}
+	if v := os.Getenv("OPERITAS_FLUX_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Flux.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_SPACELIFT_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Spacelift.WebhookSecret = v
+	}
+	if v := os.Getenv("OPERITAS_GRAFANA_WEBHOOK_SECRET"); v != "" {
+		cfg.Sources.Grafana.WebhookSecret = v
 	}
 }
 
@@ -467,6 +1025,107 @@ func validate(cfg *Config) error {
 		}
 	}
 
+	if cfg.Sources.Jira.Enabled {
+		if cfg.Sources.Jira.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_JIRA_WEBHOOK_SECRET is required when jira source is enabled"))
+		}
+		if cfg.Sources.Jira.BaseURL != "" && isKnownNonEUEndpoint(cfg.Sources.Jira.BaseURL) {
+			errs = append(errs, fmt.Errorf("sources.jira.base_url %q appears to be a non-EU endpoint", cfg.Sources.Jira.BaseURL))
+		}
+		if cfg.Sources.Jira.BaseURL != "" && strings.HasSuffix(strings.ToLower(extractHost(cfg.Sources.Jira.BaseURL)), ".atlassian.net") {
+			slog.Warn("jira base_url is an Atlassian Cloud host: EU data residency depends on the Atlassian tenant Data Residency setting, not the URL alone; verify your tenant's residency pin at admin.atlassian.com")
+		}
+	}
+
+	if cfg.Sources.Datadog.Enabled {
+		if cfg.Sources.Datadog.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_DATADOG_WEBHOOK_SECRET is required when datadog source is enabled"))
+		}
+		if isKnownNonEUEndpoint(cfg.Sources.Datadog.APIBaseURL) ||
+			isKnownNonEUDatadogEndpoint(cfg.Sources.Datadog.APIBaseURL) {
+			errs = append(errs, fmt.Errorf("sources.datadog.api_base_url %q is not an EU Datadog endpoint; use https://api.datadoghq.eu or https://api.eu1.datadoghq.com", cfg.Sources.Datadog.APIBaseURL))
+		}
+	}
+
+	if cfg.Sources.Prometheus.Enabled {
+		scheme := cfg.Sources.Prometheus.AuthScheme
+		if scheme != "bearer" && scheme != "basic" && scheme != "none" {
+			errs = append(errs, fmt.Errorf("sources.prometheus.auth_scheme %q is invalid; must be bearer, basic, or none", scheme))
+		}
+		if scheme != "none" && cfg.Sources.Prometheus.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_PROMETHEUS_WEBHOOK_SECRET is required when prometheus source is enabled with auth"))
+		}
+		if scheme == "none" {
+			slog.Warn("prometheus webhook auth_scheme is \"none\": the endpoint accepts unauthenticated requests; use only on a fully isolated network segment")
+		}
+	}
+
+	if cfg.Sources.Bitbucket.Enabled {
+		if cfg.Sources.Bitbucket.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_BITBUCKET_WEBHOOK_SECRET is required when bitbucket source is enabled"))
+		}
+	}
+
+	if cfg.Sources.IncidentIO.Enabled {
+		if cfg.Sources.IncidentIO.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_INCIDENTIO_WEBHOOK_SECRET is required when incident_io source is enabled"))
+		}
+		if isKnownNonEUEndpoint(cfg.Sources.IncidentIO.APIBaseURL) {
+			errs = append(errs, fmt.Errorf("sources.incident_io.api_base_url %q appears to be a non-EU endpoint", cfg.Sources.IncidentIO.APIBaseURL))
+		}
+	}
+
+	if cfg.Sources.Opsgenie.Enabled {
+		if cfg.Sources.Opsgenie.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_OPSGENIE_WEBHOOK_SECRET is required when opsgenie source is enabled"))
+		}
+		if isKnownNonEUOpsgenieEndpoint(cfg.Sources.Opsgenie.APIBaseURL) {
+			errs = append(errs, fmt.Errorf("sources.opsgenie.api_base_url %q is not the EU Opsgenie endpoint; use https://api.eu.opsgenie.com/v2", cfg.Sources.Opsgenie.APIBaseURL))
+		}
+	}
+
+	if cfg.Sources.ServiceNow.Enabled {
+		if cfg.Sources.ServiceNow.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_SERVICENOW_WEBHOOK_SECRET is required when servicenow source is enabled"))
+		}
+		if cfg.Sources.ServiceNow.BaseURL == "" {
+			errs = append(errs, errors.New("sources.servicenow.base_url is required when servicenow source is enabled"))
+		} else if isKnownNonEUEndpoint(cfg.Sources.ServiceNow.BaseURL) {
+			errs = append(errs, fmt.Errorf("sources.servicenow.base_url %q appears to be a non-EU endpoint", cfg.Sources.ServiceNow.BaseURL))
+		} else if strings.HasSuffix(strings.ToLower(extractHost(cfg.Sources.ServiceNow.BaseURL)), ".service-now.com") {
+			slog.Warn("servicenow base_url is a ServiceNow Cloud host: EU data residency depends on the ServiceNow instance's Data Center setting; verify your instance is provisioned in an EU data center")
+		}
+	}
+
+	if cfg.Sources.ArgoCD.Enabled {
+		if cfg.Sources.ArgoCD.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_ARGOCD_WEBHOOK_SECRET is required when argocd source is enabled"))
+		}
+		if cfg.Sources.ArgoCD.BaseURL == "" {
+			errs = append(errs, errors.New("sources.argocd.base_url is required when argocd source is enabled"))
+		} else if isKnownNonEUEndpoint(cfg.Sources.ArgoCD.BaseURL) {
+			errs = append(errs, fmt.Errorf("sources.argocd.base_url %q appears to be a non-EU endpoint", cfg.Sources.ArgoCD.BaseURL))
+		}
+	}
+
+	if cfg.Sources.Flux.Enabled {
+		if cfg.Sources.Flux.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_FLUX_WEBHOOK_SECRET is required when flux source is enabled"))
+		}
+	}
+
+	if cfg.Sources.Spacelift.Enabled {
+		if cfg.Sources.Spacelift.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_SPACELIFT_WEBHOOK_SECRET is required when spacelift source is enabled"))
+		}
+	}
+
+	if cfg.Sources.Grafana.Enabled {
+		if cfg.Sources.Grafana.WebhookSecret == "" {
+			errs = append(errs, errors.New("OPERITAS_GRAFANA_WEBHOOK_SECRET is required when grafana source is enabled"))
+		}
+	}
+
 	if cfg.Redact.HashPII {
 		if cfg.Redact.HashKey == "" {
 			errs = append(errs, errors.New("OPERITAS_REDACT_HASH_KEY is required when redact.hash_pii is true"))
@@ -493,4 +1152,46 @@ func isKnownNonEUEndpoint(ep string) bool {
 		}
 	}
 	return false
+}
+
+// isKnownNonEUDatadogEndpoint rejects the US/global Datadog API endpoints.
+// Datadog's EU endpoints are api.datadoghq.eu and api.eu1.datadoghq.com.
+// All other datadoghq domains are US or global and must be rejected.
+func isKnownNonEUDatadogEndpoint(ep string) bool {
+	lower := strings.ToLower(ep)
+	// Allowed EU endpoints — if we match one of these, it is NOT non-EU.
+	euDatadog := []string{
+		"api.datadoghq.eu",
+		"api.eu1.datadoghq.com",
+	}
+	for _, eu := range euDatadog {
+		if strings.Contains(lower, eu) {
+			return false
+		}
+	}
+	// If the URL contains "datadoghq" and is not one of the EU endpoints, reject it.
+	return strings.Contains(lower, "datadoghq")
+}
+
+// isKnownNonEUOpsgenieEndpoint rejects the global Opsgenie endpoint.
+// The EU endpoint is api.eu.opsgenie.com; api.opsgenie.com is global/US.
+func isKnownNonEUOpsgenieEndpoint(ep string) bool {
+	lower := strings.ToLower(ep)
+	// The EU endpoint contains "eu.opsgenie"; the global one is just "api.opsgenie".
+	if strings.Contains(lower, "eu.opsgenie") {
+		return false
+	}
+	return strings.Contains(lower, "opsgenie.com")
+}
+
+// extractHost returns the hostname from a URL string. Returns the raw string on
+// parse failure so callers can still do suffix checks safely.
+func extractHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	// u.Host may include a port (host:port); strip it for hostname comparison.
+	host := u.Hostname()
+	return host
 }

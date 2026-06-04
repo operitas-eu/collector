@@ -1,0 +1,33 @@
+{
+  "version": "1",
+  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
+  "status": "resolved",
+  "orgId": 1,
+  "title": "[RESOLVED] HighErrorRate (prod api critical)",
+  "state": "ok",
+  "message": "1 alert(s) are resolved.",
+  "alerts": [
+    {
+      "status": "resolved",
+      "labels": {
+        "alertname": "HighErrorRate",
+        "grafana_folder": "Prod",
+        "env": "production",
+        "severity": "critical",
+        "job": "api-server"
+      },
+      "annotations": {
+        "summary": "High error rate on api-server",
+        "description": "Error rate for user alice@example.com is below threshold"
+      },
+      "startsAt": "2026-05-07T08:14:02Z",
+      "endsAt": "2026-05-07T08:30:00Z",
+      "dashboardURL": "https://grafana.example.com/d/abc123/prod-dashboard",
+      "panelURL": "https://grafana.example.com/d/abc123/prod-dashboard?panelId=7",
+      "generatorURL": "https://grafana.example.com/alerting/abc123/edit",
+      "fingerprint": "d1e2f3a4b5c67890",
+      "silenceURL": "https://grafana.example.com/alerting/silence/new?alertmanager=grafana",
+      "imageURL": ""
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "event_type": "public_incident.incident_created_v2",
+  "event": {
+    "id": "01ABC123DEF456",
+    "resource": {
+      "id": "01INCIDENT001",
+      "type": "Incident"
+    }
+  },
+  "incident": {
+    "id": "01INCIDENT001",
+    "reference": "INC-42",
+    "name": "Database latency spike on eu-west-1",
+    "status": "triage",
+    "severity": {
+      "id": "01SEV001",
+      "name": "P2",
+      "rank": 2
+    },
+    "reporter": {
+      "id": "01USER001",
+      "name": "Alice Smith",
+      "email": "alice@example.com",
+      "role": "viewer"
+    },
+    "assignees": [],
+    "created_at": "2026-05-07T08:14:02Z",
+    "updated_at": "2026-05-07T08:14:02Z"
+  }
+}

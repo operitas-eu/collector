@@ -1,0 +1,15 @@
+{
+  "collector_id": "11111111-1111-1111-1111-111111111111",
+  "tenant_id": "22222222-2222-2222-2222-222222222222",
+  "envelope_version": "1.0.0",
+  "events": [
+    {
+      "occurred_at": "2026-05-07T08:14:02.000000000Z",
+      "event_type": "change.approved",
+      "event_source": "jira",
+      "actor": "alice",
+      "resource": "OPS-123",
+      "payload": {"issue_key": "OPS-123", "from_status": "In Review", "to_status": "Done", "issue_type": "Story"}
+    }
+  ]
+}
