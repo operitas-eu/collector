@@ -45,14 +45,36 @@ kubectl create secret tls collector-mtls \
   --cert=collector.crt \
   --key=collector.key
 
-# 3. Create source-credential secrets (only include keys for sources you enable):
+# 3. Create source-credential secrets (only include keys for sources you enable).
+#    Poll-only sources need a token; webhook sources need a webhook secret;
+#    hybrid sources need both. Examples for a common subset:
 kubectl create secret generic collector-secrets \
   --namespace operitas \
   --from-literal=OPERITAS_GITHUB_TOKEN=ghp_... \
   --from-literal=OPERITAS_GITHUB_WEBHOOK_SECRET=whsec_... \
   --from-literal=OPERITAS_GITLAB_TOKEN=glpat_... \
   --from-literal=OPERITAS_GITLAB_WEBHOOK_SECRET=glwh_... \
-  --from-literal=OPERITAS_PD_SIGNING_SECRET=pdsk_...
+  --from-literal=OPERITAS_PD_SIGNING_SECRET=pdsk_... \
+  --from-literal=OPERITAS_DATADOG_TOKEN=... \
+  --from-literal=OPERITAS_DATADOG_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_JIRA_TOKEN=... \
+  --from-literal=OPERITAS_JIRA_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_ARGOCD_TOKEN=... \
+  --from-literal=OPERITAS_ARGOCD_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_FLUX_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_SPACELIFT_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_BITBUCKET_TOKEN=... \
+  --from-literal=OPERITAS_BITBUCKET_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_INCIDENTIO_TOKEN=... \
+  --from-literal=OPERITAS_INCIDENTIO_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_OPSGENIE_TOKEN=... \
+  --from-literal=OPERITAS_OPSGENIE_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_GRAFANA_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_PROMETHEUS_WEBHOOK_SECRET=... \
+  --from-literal=OPERITAS_SERVICENOW_TOKEN=... \
+  --from-literal=OPERITAS_SERVICENOW_WEBHOOK_SECRET=...
+# Azure poll-only uses workload identity by default (no secret required for AKS);
+# for non-AKS deployments add OPERITAS_AZURE_CLIENT_SECRET.
 
 # 4. Install the chart, referencing the API key secret you just created:
 helm install operitas-collector ./helm/collector \
@@ -195,9 +217,18 @@ collector upgrade.
     [--payload-file <path>]      Path to a JSON object file; defaults to {}
 ```
 
-`event-source` must be one of the enum values in the evidence envelope schema:
-`aws.cloudtrail`, `azure.activity`, `github`, `gitlab`, `pagerduty`, `datadog`,
-`jira`, `argocd`, `k8s.audit`, `vendor.statuspage`.
+`event-source` must be one of the implemented enum values in the evidence envelope
+schema:
+
+```
+aws.cloudtrail   azure.activity   github        gitlab
+pagerduty        datadog          jira          argocd
+bitbucket        flux             spacelift     incident.io
+opsgenie         grafana          prometheus    servicenow
+```
+
+Two values are reserved in the schema but have no collector source package yet
+and cannot be used with `--emit-event`: `k8s.audit`, `vendor.statuspage`.
 
 ### Exit codes
 
@@ -254,13 +285,27 @@ On success the structured log will include:
 
 ## What this collector reads
 
-| Source | What | How |
-|---|---|---|
-| AWS CloudTrail | Log files delivered to an S3 bucket | `s3:ListObjectsV2`, `s3:GetObject` |
-| Azure Activity Logs | Management-plane audit log for an Azure subscription | Azure Monitor ARM read API (`GET` only) |
-| GitHub | Pull requests, deployment events | `GET` REST endpoints; webhook receiver |
-| GitLab | Merge requests, deployment events | `GET` REST endpoints; webhook receiver |
-| PagerDuty | Incident lifecycle events | Webhook receiver |
+Collection mode key: **poll** = outbound REST polling only; **webhook** = inbound
+webhook receiver only; **hybrid** = webhook preferred, REST polling as fallback.
+
+| Source | `event_source` value | What | Mode |
+|---|---|---|---|
+| AWS CloudTrail | `aws.cloudtrail` | Log files delivered to an S3 bucket (`s3:ListObjectsV2`, `s3:GetObject`) | poll |
+| Azure Activity Logs | `azure.activity` | Management-plane audit log for an Azure subscription (Azure Monitor ARM `GET` only) | poll |
+| GitHub | `github` | Pull requests, deployment events | hybrid |
+| GitLab | `gitlab` | Merge requests, deployment events | hybrid |
+| PagerDuty | `pagerduty` | Incident lifecycle events (v3 webhook) | webhook |
+| Datadog | `datadog` | Monitor alert events (`GET /api/v1/events` EU endpoint) | hybrid |
+| Jira | `jira` | Issue transitions and project events (`GET /rest/api/3/search`) | hybrid |
+| Argo CD | `argocd` | Application deployment and sync events (`GET /api/v1/applications`) | hybrid |
+| Bitbucket | `bitbucket` | Pull requests and push events | hybrid |
+| Flux CD | `flux` | Kustomization / HelmRelease reconciliation transitions (notification-controller) | webhook |
+| Spacelift | `spacelift` | Stack run state-change notifications | webhook |
+| incident.io | `incident.io` | Incident lifecycle events (`GET /v2/incidents`) | hybrid |
+| Opsgenie | `opsgenie` | Alert lifecycle events (`GET /v2/alerts`, EU endpoint only) | hybrid |
+| Grafana | `grafana` | Alerting contact-point webhook notifications | webhook |
+| Prometheus / Alertmanager | `prometheus` | Alertmanager webhook notifications (firing / resolved) | webhook |
+| ServiceNow | `servicenow` | Change requests and incidents (Table API `GET`) | hybrid |
 
 ## What this collector never reads or writes
 
