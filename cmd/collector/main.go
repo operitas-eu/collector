@@ -7,17 +7,21 @@
 // /var/lib/operitas/ (WAL and cursor state). Logs are JSON to stdout.
 // Prometheus metrics are exposed on :9090/metrics.
 //
-// Sources (16 total):
+// Sources (16 implemented):
 //
-//	Existing:  aws.cloudtrail, azure.activity, github, gitlab, pagerduty
-//	Fully impl: jira, datadog, prometheus
-//	Stubs:     bitbucket, flux, spacelift, incident.io, opsgenie, grafana, servicenow, argocd
+//	poll:    aws.cloudtrail, azure.activity
+//	webhook: pagerduty, flux, spacelift, grafana, prometheus
+//	hybrid:  github, gitlab, datadog, jira, argocd, bitbucket,
+//	         incident.io, opsgenie, servicenow
+//
+// "hybrid" means webhook receiver preferred; REST polling as fallback.
+// Two additional enum values are reserved in the schema but have no source
+// package: k8s.audit, vendor.statuspage.
 //
 // Webhook routing: github (port 8081), gitlab (port 8083), pagerduty (port 8082)
-// continue on their dedicated ports. All new sources share a single webhook
+// continue on their dedicated ports. All other webhook sources share a single
 // server on WEBHOOK_PORT (default 8090, config key sources.shared_webhook_port).
-// See internal/sources/CONTRACT.md and helm/collector/README.md for the
-// transitional state and migration plan.
+// See internal/sources/CONTRACT.md and helm/collector/README.md for details.
 package main
 
 import (
@@ -61,59 +65,78 @@ import (
 var version = "dev"
 
 func main() {
-	// --drain-dlq: replay all DLQ entries back into the WAL with fresh
-	// idempotency keys and exit. Run this after fixing a schema mismatch on
-	// the ingest side. The flag is parsed before config so operators can run
-	// it without a fully valid config (e.g. in an init container).
-	//
-	// --emit-event: build one synthetic envelope from the supplied sub-flags and
-	// ship it via the transport client, then exit. Used to validate the wire
-	// contract against the production control plane without running a full
-	// collector. Config comes from env vars (OPERITAS_INGEST_API_KEY,
-	// OPERITAS_INGEST_URL, OPERITAS_COLLECTOR_ID); no config file required.
-	drainDLQ := flag.Bool("drain-dlq", false,
-		"replay all DLQ files from /var/lib/operitas/dlq/ into the WAL and exit")
-	emitEvent := flag.Bool("emit-event", false,
-		"build one synthetic envelope from --tenant-id/--event-type/--event-source flags, ship it to the ingest API, and exit")
-	flag.Parse()
-
 	// Structured JSON logs to stdout only. Never write logs to disk.
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slogLevel(),
 	})))
 
-	if *drainDLQ {
+	os.Exit(run(os.Args[1:]))
+}
+
+// run implements the top-level arg routing. It is separated from main so that
+// tests can drive the real arg-parsing path with arbitrary []string inputs
+// without forking a subprocess.
+//
+// Mode detection works by scanning args for --emit-event or --drain-dlq before
+// any flag.Parse call. This avoids the flag.CommandLine ExitOnError parser
+// choking on sub-flags (e.g. --tenant-id) that are not registered globally.
+// Both the documented no-separator form:
+//
+//	collector --emit-event --tenant-id <uuid> ...
+//
+// and the legacy separator form:
+//
+//	collector --emit-event -- --tenant-id <uuid> ...
+//
+// are accepted.
+func run(args []string) int {
+	switch detectMode(args) {
+	case modeDrainDLQ:
+		// --drain-dlq: replay all DLQ entries back into the WAL with fresh
+		// idempotency keys and exit. Run this after fixing a schema mismatch on
+		// the ingest side. The flag is parsed before config so operators can run
+		// it without a fully valid config (e.g. in an init container).
 		slog.Info("drain-dlq mode: replaying DLQ entries into WAL",
 			"dlq_dir", config.DLQDir,
 			"wal_dir", config.WALDir,
 		)
 		if err := transport.DrainDLQ(config.DLQDir, config.WALDir); err != nil {
 			slog.Error("drain-dlq failed", "err", err)
-			os.Exit(1)
+			return 1
 		}
 		slog.Info("drain-dlq complete")
-		os.Exit(0)
-	}
+		return 0
 
-	if *emitEvent {
+	case modeEmitEvent:
+		// --emit-event: build one synthetic envelope from the supplied sub-flags and
+		// ship it via the transport client, then exit. Used to validate the wire
+		// contract against the production control plane without running a full
+		// collector. Config comes from env vars (OPERITAS_INGEST_API_KEY,
+		// OPERITAS_INGEST_URL, OPERITAS_COLLECTOR_ID); no config file required.
+		subArgs := stripModeFlag(args, "--emit-event")
 		subFlags := flag.NewFlagSet("emit-event", flag.ContinueOnError)
-		f, err := parseEmitEventFlags(subFlags, flag.Args())
+		f, err := parseEmitEventFlags(subFlags, subArgs)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "emit-event: %v\n", err)
-			os.Exit(2)
+			return 2
 		}
 		if err := validateEmitEventFlags(f); err != nil {
 			fmt.Fprintf(os.Stderr, "emit-event: %v\n", err)
-			os.Exit(2)
+			return 2
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
 		if err := runEmitEvent(ctx, f); err != nil {
 			slog.Error("emit-event failed", "err", err)
-			os.Exit(1)
+			return 1
 		}
-		os.Exit(0)
+		return 0
 	}
+
+	// Normal daemon mode: use the global flag set for the handful of top-level
+	// flags and then start the collector.
+	daemonFlags := flag.NewFlagSet("collector", flag.ExitOnError)
+	daemonFlags.Parse(args) //nolint:errcheck // ExitOnError never returns non-nil
 
 	slog.Info("collector starting", "version", version)
 
@@ -125,7 +148,7 @@ func main() {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		slog.Error("configuration error", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -134,7 +157,7 @@ func main() {
 	r, err := redact.New(cfg.Redact.HashPII, cfg.Redact.HashKey)
 	if err != nil {
 		slog.Error("redactor init failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	tcfg := transport.ClientConfig{
@@ -159,7 +182,7 @@ func main() {
 	client, err := transport.NewClient(ctx, tcfg)
 	if err != nil {
 		slog.Error("transport client init failed", "err", err)
-		os.Exit(1)
+		return 1
 	}
 
 	// emit is the single callback all source packages use to hand off a
@@ -173,7 +196,7 @@ func main() {
 		ct, err := awscloudtrail.New(ctx, cfg.Sources.CloudTrail, r, emit)
 		if err != nil {
 			slog.Error("cloudtrail source init failed", "err", err)
-			os.Exit(1)
+			return 1
 		}
 		wg.Add(1)
 		go func() {
@@ -188,7 +211,7 @@ func main() {
 		az, err := azureactivity.New(cfg.Sources.AzureActivity, r, emit)
 		if err != nil {
 			slog.Error("azureactivity source init failed", "err", err)
-			os.Exit(1)
+			return 1
 		}
 		wg.Add(1)
 		go func() {
@@ -447,6 +470,57 @@ func main() {
 
 	wg.Wait()
 	slog.Info("collector stopped")
+	return 0
+}
+
+// collectorMode is the operating mode selected by the first recognized flag.
+type collectorMode int
+
+const (
+	modeDaemon    collectorMode = iota // default: run the full collector daemon
+	modeEmitEvent                      // --emit-event: ship one synthetic event and exit
+	modeDrainDLQ                       // --drain-dlq: replay DLQ into WAL and exit
+)
+
+// detectMode scans args for the first occurrence of --emit-event or --drain-dlq
+// (with or without an = suffix) and returns the corresponding mode. A "--"
+// separator, if present, is ignored — args after it are sub-flags for the mode.
+func detectMode(args []string) collectorMode {
+	for _, a := range args {
+		switch a {
+		case "--emit-event", "-emit-event":
+			return modeEmitEvent
+		case "--drain-dlq", "-drain-dlq":
+			return modeDrainDLQ
+		case "--":
+			return modeDaemon
+		}
+	}
+	return modeDaemon
+}
+
+// stripModeFlag removes the first occurrence of modeFlag from args, strips a
+// leading "--" separator if present, and returns the remaining args for the
+// sub-FlagSet. This supports both documented forms:
+//
+//	collector --emit-event --tenant-id uuid ...   (no separator)
+//	collector --emit-event -- --tenant-id uuid ... (legacy separator)
+func stripModeFlag(args []string, modeFlag string) []string {
+	out := make([]string, 0, len(args))
+	skippedMode := false
+	for _, a := range args {
+		if !skippedMode && (a == modeFlag || a == modeFlag[1:]) {
+			skippedMode = true
+			continue
+		}
+		if skippedMode && a == "--" {
+			// drop the separator; remaining args go straight to sub-FlagSet
+			skippedMode = false // already skipped; reset guard so loop continues
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func slogLevel() slog.Level {
