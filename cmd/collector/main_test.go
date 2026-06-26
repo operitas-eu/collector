@@ -299,6 +299,103 @@ func TestParseEmitEventFlags(t *testing.T) {
 	}
 }
 
+// TestArgRouting verifies that detectMode and stripModeFlag together produce the
+// correct sub-flag args for both the documented no-separator form and the legacy
+// separator form. This is the gap that allowed the bug where --emit-event with
+// inline sub-flags was broken: flag.CommandLine would choke on --tenant-id
+// before the sub-FlagSet ever got to parse it.
+func TestArgRouting(t *testing.T) {
+	tenantID := "b1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+	tests := []struct {
+		name         string
+		args         []string
+		wantMode     collectorMode
+		wantSubArgs  []string // expected args fed to the emit-event sub-FlagSet
+		wantTenantID string   // expected parsed value after sub-FlagSet parses wantSubArgs
+	}{
+		{
+			name: "documented no-separator form",
+			args: []string{
+				"--emit-event",
+				"--tenant-id", tenantID,
+				"--event-type", "vendor.outage",
+				"--event-source", "aws.cloudtrail",
+			},
+			wantMode:     modeEmitEvent,
+			wantSubArgs:  []string{"--tenant-id", tenantID, "--event-type", "vendor.outage", "--event-source", "aws.cloudtrail"},
+			wantTenantID: tenantID,
+		},
+		{
+			name: "legacy separator form",
+			args: []string{
+				"--emit-event",
+				"--",
+				"--tenant-id", tenantID,
+				"--event-type", "vendor.outage",
+				"--event-source", "aws.cloudtrail",
+			},
+			wantMode:     modeEmitEvent,
+			wantSubArgs:  []string{"--tenant-id", tenantID, "--event-type", "vendor.outage", "--event-source", "aws.cloudtrail"},
+			wantTenantID: tenantID,
+		},
+		{
+			name:     "drain-dlq mode",
+			args:     []string{"--drain-dlq"},
+			wantMode: modeDrainDLQ,
+		},
+		{
+			name:     "daemon mode (no flags)",
+			args:     []string{},
+			wantMode: modeDaemon,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mode := detectMode(tc.args)
+			if mode != tc.wantMode {
+				t.Fatalf("detectMode(%v) = %v, want %v", tc.args, mode, tc.wantMode)
+			}
+
+			if mode != modeEmitEvent {
+				return // sub-arg parsing only applies to emit-event
+			}
+
+			subArgs := stripModeFlag(tc.args, "--emit-event")
+
+			// Verify the sub-args match what we expect (order-sensitive).
+			if len(subArgs) != len(tc.wantSubArgs) {
+				t.Fatalf("stripModeFlag: got %v (len %d), want %v (len %d)",
+					subArgs, len(subArgs), tc.wantSubArgs, len(tc.wantSubArgs))
+			}
+			for i := range subArgs {
+				if subArgs[i] != tc.wantSubArgs[i] {
+					t.Errorf("subArgs[%d] = %q, want %q", i, subArgs[i], tc.wantSubArgs[i])
+				}
+			}
+
+			// Feed the sub-args through parseEmitEventFlags, which is the real
+			// call site inside run(). This is the path that was broken before the
+			// fix: flag.CommandLine (ExitOnError) would exit on --tenant-id.
+			fs := flag.NewFlagSet("emit-event-routing-test", flag.ContinueOnError)
+			f, err := parseEmitEventFlags(fs, subArgs)
+			if err != nil {
+				t.Fatalf("parseEmitEventFlags returned unexpected error: %v", err)
+			}
+			if f.tenantID != tc.wantTenantID {
+				t.Errorf("tenantID = %q, want %q", f.tenantID, tc.wantTenantID)
+			}
+			if f.eventType != "vendor.outage" {
+				t.Errorf("eventType = %q, want %q", f.eventType, "vendor.outage")
+			}
+			if f.eventSource != "aws.cloudtrail" {
+				t.Errorf("eventSource = %q, want %q", f.eventSource, "aws.cloudtrail")
+			}
+		})
+	}
+}
+
 // TestRunEmitEventIntegration exercises runEmitEvent end-to-end: spins up a
 // fake ingest server, sets the required env vars, invokes runEmitEvent, and
 // asserts the server received a well-formed envelope.
