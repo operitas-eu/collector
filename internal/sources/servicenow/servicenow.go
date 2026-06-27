@@ -70,6 +70,14 @@ func New(cfg config.ServiceNowConfig, r *redact.Redactor, emit func(envelope.Eve
 
 func newHTTPClient() *http.Client {
 	return &http.Client{
+		// Never follow redirects. A 302 from the ServiceNow Table API could
+		// forward the Authorization header (Bearer or Basic) to an
+		// attacker-controlled host if the redirect crosses a host boundary.
+		// The caller sees the 3xx and treats it as a non-2xx error — no
+		// credentials are forwarded.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			TLSHandshakeTimeout:   10 * time.Second,

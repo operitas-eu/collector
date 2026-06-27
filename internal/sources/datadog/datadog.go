@@ -69,6 +69,14 @@ func New(cfg config.DatadogConfig, r *redact.Redactor, emit func(envelope.Event)
 
 func newHTTPClient() *http.Client {
 	return &http.Client{
+		// Never follow redirects. A 302 from the vendor API could send
+		// DD-API-KEY / DD-APPLICATION-KEY headers to an attacker-controlled
+		// host if the redirect crosses a host boundary. Returning
+		// http.ErrUseLastResponse causes the caller to see the 3xx and treat
+		// it as a non-2xx error — no credentials are forwarded.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			TLSHandshakeTimeout:   10 * time.Second,

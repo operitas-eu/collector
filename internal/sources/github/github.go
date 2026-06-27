@@ -70,6 +70,13 @@ func New(cfg config.GitHubConfig, r *redact.Redactor, emit func(envelope.Event))
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, httpCl)
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: cfg.Token})
 	tc := oauth2.NewClient(ctx, ts)
+	// Never follow redirects. The oauth2 transport adds Authorization: Bearer
+	// on every RoundTrip — including on redirected requests — so a 302 from
+	// the GitHub API would exfiltrate the token to the redirect destination.
+	// Setting CheckRedirect on the outer *http.Client prevents all auto-following.
+	tc.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	gh := gogithub.NewClient(tc)
 
 	s := &Source{

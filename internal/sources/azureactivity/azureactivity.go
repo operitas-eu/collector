@@ -131,6 +131,16 @@ func (s *Source) Run(ctx context.Context) error {
 		"subscription_id", s.cfg.SubscriptionID,
 		"poll_interval", s.cfg.PollInterval,
 	)
+	// EU data residency depends on subscription/tenant geography, NOT on the
+	// management.azure.com or login.microsoftonline.com hostnames — both are
+	// global endpoints. Verify that the configured subscription is provisioned
+	// in an EU Azure region (e.g. westeurope, northeurope, germanywestcentral)
+	// before using this collector in a DORA-regulated environment.
+	slog.Warn("azureactivity: EU data residency is not enforced by the ARM hostname — "+
+		"it depends on the subscription's region; verify the subscription is in an EU Azure region "+
+		"(westeurope, northeurope, germanywestcentral, etc.) before production use",
+		"subscription_id", s.cfg.SubscriptionID,
+	)
 	return internalrt.PollLoop(ctx, s.cfg.PollInterval, "azureactivity", s.poll)
 }
 

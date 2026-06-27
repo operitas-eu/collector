@@ -196,6 +196,169 @@ func TestRedactHashKeyBadHexFailsStartup(t *testing.T) {
 	})
 }
 
+// TestUnknownEndpointFailsClosedWithoutFlag verifies that an unrecognised host
+// (neither in the non-EU deny-list nor in the known-acceptable allowlist) causes
+// config.Load to fail when OPERITAS_ALLOW_NON_EU_ENDPOINT is not set.
+// This is the eu-residency-1 fail-closed requirement.
+func TestUnknownEndpointFailsClosedWithoutFlag(t *testing.T) {
+	t.Setenv("OPERITAS_INGEST_API_KEY", "testid0000000000.dGVzdA")
+	t.Setenv("OPERITAS_GITLAB_TOKEN", "glpat-x")
+	t.Setenv("OPERITAS_ALLOW_NON_EU_ENDPOINT", "")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	// Use a custom ArgoCD base_url with a host that is not on any allowlist and
+	// is not recognisably non-EU either — an "unknown" vanity domain.
+	content := "tenant_id: \"aaaaaaaa-0000-0000-0000-000000000001\"\n" +
+		"collector_id: \"bbbbbbbb-0000-0000-0000-000000000001\"\n" +
+		"ingest:\n" +
+		"  tls_cert_file: \"/nonexistent/tls.crt\"\n" +
+		"  tls_key_file:  \"/nonexistent/tls.key\"\n" +
+		"sources:\n" +
+		"  argocd:\n" +
+		"    enabled: true\n" +
+		"    base_url: \"https://argocd.internal.example.com\"\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPERITAS_ARGOCD_WEBHOOK_SECRET", "secret")
+	t.Setenv("OPERITAS_ARGOCD_TOKEN", "token")
+
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for unrecognised non-EU endpoint without OPERITAS_ALLOW_NON_EU_ENDPOINT=1, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot be automatically verified as EU-resident") {
+		t.Errorf("error should mention EU-residency verification failure; got: %v", err)
+	}
+}
+
+// TestUnknownEndpointPassesWithAcknowledgementFlag verifies that setting
+// OPERITAS_ALLOW_NON_EU_ENDPOINT=1 allows an unrecognised host through the
+// fail-closed check. The error from config.Load is expected to mention the TLS
+// cert (not the EU check) since the TLS file doesn't exist.
+func TestUnknownEndpointPassesWithAcknowledgementFlag(t *testing.T) {
+	t.Setenv("OPERITAS_INGEST_API_KEY", "testid0000000000.dGVzdA")
+	t.Setenv("OPERITAS_ALLOW_NON_EU_ENDPOINT", "1")
+	t.Setenv("OPERITAS_ARGOCD_WEBHOOK_SECRET", "secret")
+	t.Setenv("OPERITAS_ARGOCD_TOKEN", "token")
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	content := "tenant_id: \"aaaaaaaa-0000-0000-0000-000000000001\"\n" +
+		"collector_id: \"bbbbbbbb-0000-0000-0000-000000000001\"\n" +
+		"ingest:\n" +
+		"  tls_cert_file: \"/nonexistent/tls.crt\"\n" +
+		"  tls_key_file:  \"/nonexistent/tls.key\"\n" +
+		"sources:\n" +
+		"  argocd:\n" +
+		"    enabled: true\n" +
+		"    base_url: \"https://argocd.internal.example.com\"\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := config.Load(path)
+	// Load may still error on the TLS cert/key (non-existent), but it must NOT
+	// mention "cannot be automatically verified as EU-resident".
+	if err != nil && strings.Contains(err.Error(), "cannot be automatically verified as EU-resident") {
+		t.Errorf("OPERITAS_ALLOW_NON_EU_ENDPOINT=1 should suppress the EU-residency error; got: %v", err)
+	}
+}
+
+// TestKnownEUEndpointsPassWithoutFlag verifies that the 16 supported sources'
+// default EU endpoints do not require OPERITAS_ALLOW_NON_EU_ENDPOINT=1.
+// Each is on the known-acceptable list in isKnownAcceptableEndpoint.
+func TestKnownEUEndpointsPassWithoutFlag(t *testing.T) {
+	t.Setenv("OPERITAS_ALLOW_NON_EU_ENDPOINT", "")
+
+	endpoints := []struct {
+		name    string
+		host    string
+		wantErr bool // true if the host itself should trigger an EU error
+	}{
+		{"operitas-ingest", "https://ingest.operitas.eu/v1/events:batch", false},
+		{"datadog-eu", "https://api.datadoghq.eu", false},
+		{"datadog-eu1", "https://api.eu1.datadoghq.com", false},
+		{"opsgenie-eu", "https://api.eu.opsgenie.com/v2", false},
+		{"incidentio", "https://api.incident.io/v2", false},
+		{"gitlab-saas", "https://gitlab.com/api/v4", false},
+		{"atlassian-net", "https://mycompany.atlassian.net", false},
+		{"service-now", "https://myinstance.service-now.com", false},
+		{"bitbucket-cloud", "https://api.bitbucket.org/2.0", false},
+		{"custom-eu-host", "https://argocd.example.eu", false},
+	}
+	for _, tc := range endpoints {
+		t.Run(tc.name, func(t *testing.T) {
+			got := config.IsKnownAcceptableEndpointForTest(tc.host)
+			nonEU := config.IsKnownNonEUEndpointForTest(tc.host)
+			// The endpoint must be on the acceptable list OR not on the non-EU list.
+			if nonEU {
+				t.Errorf("endpoint %q incorrectly flagged as non-EU", tc.host)
+			}
+			if !got && !tc.wantErr {
+				t.Errorf("endpoint %q should be on the known-acceptable list", tc.host)
+			}
+		})
+	}
+}
+
+// TestNewNonEUDenyListPatterns verifies every new deny-list fragment added in
+// PR-C2 is correctly detected as non-EU. These patterns are new and were not
+// covered by the earlier TestKnownEUEndpointsPassWithoutFlag test.
+// IsKnownNonEUEndpointForTest is defined in export_test.go.
+func TestNewNonEUDenyListPatterns(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		want bool // true means the host must be rejected as non-EU
+	}{
+		// US GovCloud fragments
+		{"us-gov prefix", "https://s3.us-gov-west-1.amazonaws.com/bucket", true},
+		{"us-gov-east", "https://sts.us-gov-east-1.amazonaws.com", true},
+
+		// China region fragments
+		{"cn-north", "https://s3.cn-north-1.amazonaws.com.cn/bucket", true},
+		{"cn-northwest", "https://s3.cn-northwest-1.amazonaws.com.cn/bucket", true},
+
+		// .us. / .us: / .us/ dot-separated fragments
+		{"dot-us-dot", "https://ingest.us.example.com/events", true},
+		{"dot-us-slash", "https://ingest.us/events", true},
+		{"dot-us-colon", "https://ingest.us:8443/events", true},
+
+		// -us. / -us/ dash-separated fragments
+		{"dash-us-dot", "https://api-us.example.com/v1", true},
+		{"dash-us-slash", "https://api-us/events", true},
+
+		// us1.–us5. numeric regional variants
+		{"us1 prefix", "https://us1.example.com/api", true},
+		{"us2 prefix", "https://us2.example.com/api", true},
+		{"us3 prefix", "https://us3.example.com/api", true},
+		{"us4 prefix", "https://us4.example.com/api", true},
+		{"us5 prefix", "https://us5.example.com/api", true},
+
+		// Datadog US guard (datadoghq.com without .eu or eu1. prefix)
+		{"datadoghq-us", "https://api.datadoghq.com/api/v1", true},
+		{"datadoghq-us-subdomain", "https://app.datadoghq.com/logs", true},
+
+		// Negative cases — these must NOT be flagged as non-EU
+		{"eu-tld fine", "https://argocd.example.eu", false},
+		{"datadoghq-eu fine", "https://api.datadoghq.eu", false},
+		{"datadoghq-eu1 fine", "https://api.eu1.datadoghq.com", false},
+		{"atlassian-net fine", "https://company.atlassian.net", false},
+		{"us in path only", "https://api.example.com/api/us/events", false},
+		{"username fine", "https://api.example.eu/api", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := config.IsKnownNonEUEndpointForTest(tc.host)
+			if got != tc.want {
+				t.Errorf("IsKnownNonEUEndpoint(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAPIKeyNeverAppearsInValidationError ensures that the raw key value is
 // never echoed back in any error string. The validation only checks for
 // presence, not format, so there is no format-error path that could leak the

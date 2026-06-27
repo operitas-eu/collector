@@ -114,13 +114,18 @@ func dlqDelete(path string) error {
 
 // dlqPrune removes DLQ entries older than maxAge and, if the directory exceeds
 // maxBytes, deletes oldest-first until under cap. Mirrors walPrune semantics.
-func dlqPrune(dir string, maxAge time.Duration, maxBytes int64) error {
+//
+// WARNING — evidence-window implication: DLQ entries are schema-rejected events
+// that were not accepted by the ingest ledger. Pruning them is permanent loss.
+// The function returns the count of pruned entries so callers can emit a loud
+// WARN when entries are dropped during a live run.
+func dlqPrune(dir string, maxAge time.Duration, maxBytes int64) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return 0, nil
 		}
-		return fmt.Errorf("dlq prune readdir: %w", err)
+		return 0, fmt.Errorf("dlq prune readdir: %w", err)
 	}
 
 	type fileInfo struct {
@@ -129,6 +134,7 @@ func dlqPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 		modTime time.Time
 	}
 	var files []fileInfo
+	pruned := 0
 	cutoff := time.Now().Add(-maxAge)
 
 	for _, de := range entries {
@@ -145,21 +151,23 @@ func dlqPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 				slog.Warn("dlq: prune by age failed", "path", path, "err", err)
 				continue
 			}
-			slog.Info("dlq: pruned aged entry", "path", path, "age", time.Since(info.ModTime()))
+			pruned++
+			slog.Warn("dlq: dropped schema-rejected entry (age cap exceeded); evidence permanently lost",
+				"path", path, "age", time.Since(info.ModTime()))
 			continue
 		}
 		files = append(files, fileInfo{path: path, size: info.Size(), modTime: info.ModTime()})
 	}
 
 	if maxBytes <= 0 {
-		return nil
+		return pruned, nil
 	}
 	var total int64
 	for _, f := range files {
 		total += f.size
 	}
 	if total <= maxBytes {
-		return nil
+		return pruned, nil
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
 	for _, f := range files {
@@ -170,10 +178,12 @@ func dlqPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 			slog.Warn("dlq: prune by size failed", "path", f.path, "err", err)
 			continue
 		}
-		slog.Info("dlq: pruned oversized spool entry", "path", f.path, "size", f.size)
+		pruned++
+		slog.Warn("dlq: dropped schema-rejected entry (size cap exceeded); evidence permanently lost",
+			"path", f.path, "size", f.size)
 		total -= f.size
 	}
-	return nil
+	return pruned, nil
 }
 
 // dlqRecoverEntry holds the parsed content of a DLQ file plus its filesystem path.
