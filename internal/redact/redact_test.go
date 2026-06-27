@@ -144,14 +144,42 @@ func TestHashPIIRequiresKey(t *testing.T) {
 	}
 }
 
-func TestVersionStringNotRedacted(t *testing.T) {
-	// "1.2.3.4" as a version string is not an IP in isolation but is parsed as one
-	// by net.ParseIP. Confirm our current behaviour (conservative: redact it).
-	// This test documents the known limitation rather than asserting correctness.
+// TestSubTokenRedactionBehavior pins the deliberate behavioral expansion introduced
+// by the regex-based redactor: IP-shaped sequences inside compound non-whitespace
+// tokens are redacted even when the old whitespace-split redactor left them intact.
+// This is the correct privacy-first choice — an unredacted embedded real IP is a
+// PII leak into the evidence ledger — but it must be explicitly asserted so that:
+//
+//	a) a future "reduce version false-positives" guard cannot silently skip a real
+//	   embedded IP without a failing test;
+//	b) the intentional redaction of IP-shaped version strings is documented.
+//
+// See the BEHAVIORAL EXPANSION note in the package docstring for the ledger
+// re-derivability consequence.
+func TestSubTokenRedactionBehavior(t *testing.T) {
 	r := mustNew(t, false, "")
-	payload := map[string]any{"msg": "version 1.2.3.4 deployed"}
-	out := r.Apply(payload)
-	_ = out["msg"] // behaviour is documented; no assertion here to avoid brittleness
+
+	t.Run("version-string sub-token is redacted (intentional)", func(t *testing.T) {
+		// "curl/7.68.0.5" — the "7.68.0.5" is syntactically a valid IPv4 address.
+		// The redactor cannot distinguish it from a real embedded IP, so the
+		// privacy-first posture is to redact it.
+		out := r.Apply(map[string]any{"ua": "curl/7.68.0.5"})
+		want := "curl/[redacted]"
+		if out["ua"] != want {
+			t.Errorf("sub-token: got %q, want %q", out["ua"], want)
+		}
+	})
+
+	t.Run("genuine IP in compound non-whitespace token is redacted", func(t *testing.T) {
+		// "build-192.168.1.1-alpha" — the embedded address is a real RFC 1918 IP.
+		// This case ensures a future false-positive guard cannot silently exempt
+		// real IPs by removing word-boundary checks.
+		out := r.Apply(map[string]any{"tag": "build-192.168.1.1-alpha"})
+		want := "build-[redacted]-alpha"
+		if out["tag"] != want {
+			t.Errorf("embedded IP: got %q, want %q", out["tag"], want)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +372,19 @@ func TestIPv6Coverage(t *testing.T) {
 		// Brackets, port, and path must survive.
 		if !strings.Contains(s, ":8080/path") {
 			t.Errorf("port/path not preserved: %q", s)
+		}
+	})
+
+	t.Run("IPv4-mapped IPv6 — applyIPv4 runs first", func(t *testing.T) {
+		// "::ffff:10.0.0.1" is an IPv4-mapped IPv6 address. applyIPv4 must fire
+		// first and redact the dotted-decimal part; applyIPv6 then sees "::ffff:"
+		// (with trailing colon) which net.ParseIP rejects, so "::ffff:" stays.
+		// This pins the IPv4-before-IPv6 ordering that prevents the IPv6 handler
+		// from consuming "::ffff:10" (valid hex group) and leaving ".0.0.1" behind.
+		out := r.Apply(map[string]any{"ip": "::ffff:10.0.0.1"})
+		want := "::ffff:[redacted]"
+		if out["ip"] != want {
+			t.Errorf("IPv4-mapped IPv6: got %q, want %q", out["ip"], want)
 		}
 	})
 }

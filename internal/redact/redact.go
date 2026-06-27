@@ -15,6 +15,19 @@
 // CORRECTNESS GUARANTEE: for any input string, the redacted output is byte-identical
 // to the input except for the redacted tokens themselves. Whitespace (tabs, newlines,
 // multi-space runs) is always preserved exactly. No whitespace collapse occurs.
+//
+// BEHAVIORAL EXPANSION vs prior implementation: the previous redactor split strings on
+// whitespace boundaries (strings.Fields), so IP-shaped sequences embedded inside
+// compound non-whitespace tokens — e.g. the "7.68.0.5" in "curl/7.68.0.5", the
+// "1.2.3.4" in "v1.2.3.4" or "libssl.so.1.2.3.4" — were NOT redacted. This
+// implementation uses regex matching and redacts every syntactically valid IP regardless
+// of token boundaries. This is the correct privacy-first choice (an unredacted embedded
+// real IP is a PII leak into the evidence ledger), but it introduces a verification-
+// mismatch class that is distinct from the whitespace-collapse bug this commit fixes:
+// evidence-ledger records produced by the OLD redactor for payloads containing
+// IP-shaped sub-tokens are NOT re-derivable via this redactor. Operators who need to
+// verify pre-upgrade ledger records containing such payloads must use the redactor
+// version that was active when those records were hashed.
 package redact
 
 import (
@@ -114,8 +127,9 @@ func (r *Redactor) redactValue(v any) any {
 // are preserved exactly.
 func (r *Redactor) redactString(s string) string {
 	// Cheap pre-check — every leaf string flows through here, but PII requires
-	// either an '@' (email), a digit (IPv4 numerals, IPv6 numerals, AWS key IDs
-	// always contain one of digits 2–7 in their base-32 suffix), or ':' (IPv6).
+	// either an '@' (email), a digit (IPv4/IPv6 numerals; AWS access key IDs
+	// always contain at least one character from the base-32 digit set {2,3,4,5,6,7}),
+	// or ':' (IPv6).
 	if !strings.ContainsAny(s, "@0123456789:") {
 		return s
 	}
