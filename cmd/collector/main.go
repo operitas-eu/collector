@@ -225,7 +225,10 @@ func run(args []string) int {
 	if cfg.Sources.GitHub.Enabled {
 		gh := github.New(cfg.Sources.GitHub, r, emit)
 
-		if cfg.Sources.GitHub.WebhookSecret != "" {
+		if gh.WebhookActive() {
+			// Webhook receiver is the preferred delivery mode for GitHub.
+			// The poller is NOT started when the webhook is active to prevent
+			// the same event appearing twice in the tamper-evident ledger.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -233,9 +236,8 @@ func run(args []string) int {
 					slog.Error("github webhook server exited with error", "err", err)
 				}
 			}()
-		}
-
-		if cfg.Sources.GitHub.Org != "" {
+		} else if cfg.Sources.GitHub.Org != "" {
+			// Polling fallback: only when no webhook secret is configured.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -249,7 +251,10 @@ func run(args []string) int {
 	if cfg.Sources.GitLab.Enabled {
 		gl := gitlab.New(cfg.Sources.GitLab, r, emit)
 
-		if cfg.Sources.GitLab.WebhookSecret != "" {
+		if gl.WebhookActive() {
+			// Webhook receiver is the preferred delivery mode for GitLab.
+			// The poller is NOT started when the webhook is active to prevent
+			// the same event appearing twice in the tamper-evident ledger.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -257,17 +262,17 @@ func run(args []string) int {
 					slog.Error("gitlab webhook server exited with error", "err", err)
 				}
 			}()
+		} else {
+			// Polling fallback: only when no webhook secret is configured.
+			// cfg.Token is already required by config.validate when GitLab is enabled.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := gl.RunPoller(ctx); err != nil {
+					slog.Error("gitlab poller exited with error", "err", err)
+				}
+			}()
 		}
-
-		// Polling fallback runs whenever a token is present; cfg.Token is
-		// already required by config.validate when GitLab is enabled.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := gl.RunPoller(ctx); err != nil {
-				slog.Error("gitlab poller exited with error", "err", err)
-			}
-		}()
 	}
 
 	if cfg.Sources.PagerDuty.Enabled {

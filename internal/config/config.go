@@ -211,6 +211,12 @@ type GitHubConfig struct {
 
 	// PollInterval controls the polling fallback schedule.
 	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// CursorPath is where the last-seen poll timestamp is persisted so the
+	// poller picks up where it left off after a restart. Without a cursor,
+	// any events that occur while the collector is down are missed.
+	// Defaults to DataDir/github_cursor.
+	CursorPath string `yaml:"cursor_path"`
 }
 
 // GitLabConfig configures the GitLab event source (webhook + polling fallback).
@@ -246,6 +252,12 @@ type GitLabConfig struct {
 
 	// PollInterval controls the polling fallback schedule.
 	PollInterval time.Duration `yaml:"poll_interval"`
+
+	// CursorPath is where the last-seen poll timestamp is persisted so the
+	// poller picks up where it left off after a restart. Without a cursor,
+	// any events that occur while the collector is down are missed.
+	// Defaults to DataDir/gitlab_cursor.
+	CursorPath string `yaml:"cursor_path"`
 }
 
 // PagerDutyConfig configures the PagerDuty webhook receiver.
@@ -732,6 +744,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Sources.GitHub.PollInterval == 0 {
 		cfg.Sources.GitHub.PollInterval = 60 * time.Second
 	}
+	if cfg.Sources.GitHub.CursorPath == "" {
+		cfg.Sources.GitHub.CursorPath = DataDir + "/github_cursor"
+	}
 	if cfg.Sources.GitLab.BaseURL == "" {
 		cfg.Sources.GitLab.BaseURL = "https://gitlab.com/api/v4"
 	}
@@ -740,6 +755,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Sources.GitLab.PollInterval == 0 {
 		cfg.Sources.GitLab.PollInterval = 60 * time.Second
+	}
+	if cfg.Sources.GitLab.CursorPath == "" {
+		cfg.Sources.GitLab.CursorPath = DataDir + "/gitlab_cursor"
 	}
 	if cfg.Sources.PagerDuty.WebhookPort == 0 {
 		cfg.Sources.PagerDuty.WebhookPort = 8082

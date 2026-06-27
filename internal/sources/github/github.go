@@ -26,6 +26,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,10 +45,14 @@ import (
 
 // Source receives GitHub webhook events and/or polls the REST API.
 type Source struct {
-	cfg    config.GitHubConfig
-	client *gogithub.Client
-	redact *redact.Redactor
-	emit   func(envelope.Event)
+	cfg        config.GitHubConfig
+	client     *gogithub.Client
+	redact     *redact.Redactor
+	emit       func(envelope.Event)
+	cursorPath string
+	// lastPollAt is the start time of the last successful poll, persisted to
+	// cursorPath so restarts resume from where they left off.
+	lastPollAt time.Time
 }
 
 // New constructs a GitHub source. It creates a read-only authenticated GitHub
@@ -65,11 +72,80 @@ func New(cfg config.GitHubConfig, r *redact.Redactor, emit func(envelope.Event))
 	tc := oauth2.NewClient(ctx, ts)
 	gh := gogithub.NewClient(tc)
 
-	return &Source{
-		cfg:    cfg,
-		client: gh,
-		redact: r,
-		emit:   emit,
+	s := &Source{
+		cfg:        cfg,
+		client:     gh,
+		redact:     r,
+		emit:       emit,
+		cursorPath: cfg.CursorPath,
+	}
+	s.loadCursor()
+	return s
+}
+
+// WebhookActive reports whether the webhook receiver is configured. When true,
+// the poller must NOT be started to prevent the same event appearing twice in
+// the tamper-evident ledger. main.go gates RunPoller on !s.WebhookActive().
+func (s *Source) WebhookActive() bool {
+	return s.cfg.WebhookSecret != ""
+}
+
+func (s *Source) loadCursor() {
+	if s.cursorPath == "" {
+		return
+	}
+	data, err := os.ReadFile(s.cursorPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("github: cursor read failed; starting from lookback window",
+				"path", s.cursorPath, "err", err)
+		}
+		return
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		slog.Warn("github: cursor parse failed; starting from lookback window",
+			"path", s.cursorPath, "err", err)
+		return
+	}
+	s.lastPollAt = t
+}
+
+// writeCursor persists the lastPollAt timestamp using the same atomic
+// open+write+fsync+close+rename+dir-fsync pattern as internal/transport/wal.go
+// to survive crashes without leaving a torn file in place of a good cursor.
+func (s *Source) writeCursor() {
+	if s.cursorPath == "" || s.lastPollAt.IsZero() {
+		return
+	}
+	tmp := s.cursorPath + ".tmp"
+	val := s.lastPollAt.UTC().Format(time.RFC3339Nano)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		slog.Warn("github: cursor open tmp failed", "err", err)
+		return
+	}
+	if _, err := f.Write([]byte(val)); err != nil {
+		f.Close()
+		slog.Warn("github: cursor write failed", "err", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		slog.Warn("github: cursor fsync failed", "err", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		slog.Warn("github: cursor close failed", "err", err)
+		return
+	}
+	if err := os.Rename(tmp, s.cursorPath); err != nil {
+		slog.Warn("github: cursor rename failed", "err", err)
+		return
+	}
+	if d, err := os.Open(filepath.Dir(s.cursorPath)); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 }
 
@@ -94,21 +170,45 @@ func (s *Source) RunPoller(ctx context.Context) error {
 }
 
 func (s *Source) poll(ctx context.Context) error {
+	pollStart := time.Now().UTC()
+
+	// Use the persisted cursor when available; fall back to a 2x-interval
+	// lookback window on first run (matches the pre-cursor behaviour and
+	// avoids a flood of historical events on initial deployment).
+	since := s.lastPollAt
+	if since.IsZero() {
+		since = pollStart.Add(-s.cfg.PollInterval * 2)
+	}
+
 	repos, err := s.listRepos(ctx)
 	if err != nil {
 		return err
 	}
 
-	since := time.Now().UTC().Add(-s.cfg.PollInterval * 2)
-
+	// Fail-closed: track whether any per-repo fetch failed. If so, the cursor
+	// is NOT advanced so PollLoop retries the same [since, now] window on the
+	// next tick. At-least-once delivery with possible ledger-deduplicated
+	// duplicates is correct; a permanent gap is permanent evidence loss.
+	var pollErr error
 	for _, repo := range repos {
 		if err := s.pollPRs(ctx, repo, since); err != nil {
 			slog.Error("github: poll PRs failed", "repo", repo, "err", err)
+			pollErr = err
 		}
 		if err := s.pollDeployments(ctx, repo, since); err != nil {
 			slog.Error("github: poll deployments failed", "repo", repo, "err", err)
+			pollErr = err
 		}
 	}
+	if pollErr != nil {
+		// Return an error so PollLoop logs and retries; the cursor stays at
+		// the previous position so the failed window is re-covered next tick.
+		return fmt.Errorf("github: poll cycle incomplete, cursor not advanced: %w", pollErr)
+	}
+
+	// All repos fetched successfully: advance the durable cursor.
+	s.lastPollAt = pollStart
+	s.writeCursor()
 	return nil
 }
 
