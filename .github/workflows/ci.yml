@@ -71,14 +71,19 @@ jobs:
         with:
           version: v3.17.3
 
+      # networkPolicy.egressCidr is intentionally required (no default) so a real
+      # deploy cannot silently allow unrestricted 443 egress and defeat EU-residency
+      # enforcement. CI passes a placeholder CIDR purely to verify the templates
+      # render; it is never deployed.
       - name: helm lint
-        run: helm lint helm/collector
+        run: helm lint helm/collector --set networkPolicy.egressCidr=203.0.113.0/32
 
       - name: helm template (verify default values render cleanly)
         run: |
           helm template collector helm/collector --debug \
             --set tenantId=00000000-0000-0000-0000-000000000000 \
             --set collectorId=00000000-0000-0000-0000-000000000001 \
+            --set networkPolicy.egressCidr=203.0.113.0/32 \
             > /dev/null
 
   # Helm unittest is skipped — no test files present in helm/collector/tests/.
