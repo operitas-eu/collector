@@ -49,17 +49,17 @@ spec:
           protocol: TCP
 
     # Allow HTTPS to the ingest endpoint only.
+    # egressCidr is REQUIRED — leaving it empty would allow 443 egress to any
+    # host, defeating the EU-residency enforcement that the NetworkPolicy exists
+    # to provide. Set it to the resolved IP CIDR of your ingest endpoint (e.g.
+    # "1.2.3.4/32" for ingest.operitas.eu). Use a /32 for a single IP or a
+    # broader CIDR if the endpoint resolves to multiple addresses. For AWS S3
+    # private-link (CloudTrail), include the VPC endpoint CIDR in a second rule
+    # or widen this CIDR to cover both.
     - ports:
         - port: 443
           protocol: TCP
-      {{- if .Values.networkPolicy.egressCidr }}
       to:
         - ipBlock:
-            cidr: {{ .Values.networkPolicy.egressCidr }}
-      {{- end }}
-
-    # Allow HTTPS to AWS S3 (CloudTrail bucket) — same port, different CIDR.
-    # In practice this is covered by the 443 rule above when the CIDR is left empty.
-    # Operators with strict egress controls should set egressCidr to cover both
-    # the ingest endpoint and the S3 VPC endpoint if using a private link.
+            cidr: {{ required "networkPolicy.egressCidr is required when networkPolicy.enabled=true; set it to the resolved IP CIDR of the ingest endpoint (e.g. \"1.2.3.4/32\") — an empty value would allow unrestricted 443 egress and defeat EU-residency enforcement" .Values.networkPolicy.egressCidr }}
 {{- end }}

@@ -960,6 +960,38 @@ var euRegions = map[string]struct{}{
 func validate(cfg *Config) error {
 	var errs []error
 
+	// eu-residency-1: OPERITAS_ALLOW_NON_EU_ENDPOINT=1 is the explicit operator
+	// acknowledgement required to use an endpoint that cannot be automatically
+	// verified as EU-resident. Without this flag, an unrecognised host fails
+	// closed at startup so misconfiguration is caught before any data is sent.
+	allowNonEU := os.Getenv("OPERITAS_ALLOW_NON_EU_ENDPOINT") == "1"
+
+	// checkEUEndpoint enforces fail-closed EU residency for a configurable
+	// endpoint. It appends an error when the endpoint is known non-EU, or when
+	// it cannot be verified as EU-resident and the operator has not set the
+	// explicit acknowledgement flag.
+	checkEUEndpoint := func(field, ep string) {
+		if ep == "" {
+			return
+		}
+		if isKnownNonEUEndpoint(ep) {
+			errs = append(errs, fmt.Errorf("%s %q appears to be a non-EU endpoint; all customer-data paths must be EU-resident", field, ep))
+			return
+		}
+		if !isKnownAcceptableEndpoint(ep) {
+			if !allowNonEU {
+				errs = append(errs, fmt.Errorf(
+					"%s %q cannot be automatically verified as EU-resident; "+
+						"confirm the host is EU-provisioned, then set OPERITAS_ALLOW_NON_EU_ENDPOINT=1 to acknowledge",
+					field, ep,
+				))
+			} else {
+				slog.Warn("OPERITAS_ALLOW_NON_EU_ENDPOINT=1 — accepting unverified endpoint; confirm it is EU-resident",
+					"field", field, "endpoint", ep)
+			}
+		}
+	}
+
 	if cfg.TenantID == "" {
 		errs = append(errs, errors.New("tenant_id is required"))
 	}
@@ -987,14 +1019,9 @@ func validate(cfg *Config) error {
 		}
 	}
 
-	// Validate that the configured endpoint does not resolve to a known non-EU
-	// region name. This is a best-effort string check; network-level enforcement
-	// relies on the NetworkPolicy in the Helm chart.
-	if ep := cfg.Ingest.Endpoint; ep != "" {
-		if isKnownNonEUEndpoint(ep) {
-			errs = append(errs, fmt.Errorf("ingest.endpoint %q appears to be a non-EU endpoint; all customer-data paths must be EU-resident", ep))
-		}
-	}
+	// Fail-closed EU check for the ingest endpoint. The default (ingest.operitas.eu)
+	// is on the EU allowlist; a custom endpoint must be explicitly acknowledged.
+	checkEUEndpoint("ingest.endpoint", cfg.Ingest.Endpoint)
 
 	if cfg.Sources.CloudTrail.Enabled {
 		if cfg.Sources.CloudTrail.BucketName == "" {
@@ -1032,9 +1059,9 @@ func validate(cfg *Config) error {
 		if cfg.Sources.GitLab.Token == "" {
 			errs = append(errs, errors.New("OPERITAS_GITLAB_TOKEN is required when gitlab source is enabled"))
 		}
-		if isKnownNonEUEndpoint(cfg.Sources.GitLab.BaseURL) {
-			errs = append(errs, fmt.Errorf("sources.gitlab.base_url %q appears to be a non-EU endpoint; point at an EU-resident GitLab instance", cfg.Sources.GitLab.BaseURL))
-		}
+		// Fail-closed EU check; gitlab.com is on the acceptable list so the
+		// default passes without the flag.
+		checkEUEndpoint("sources.gitlab.base_url", cfg.Sources.GitLab.BaseURL)
 	}
 
 	if cfg.Sources.PagerDuty.Enabled {
@@ -1047,11 +1074,12 @@ func validate(cfg *Config) error {
 		if cfg.Sources.Jira.WebhookSecret == "" {
 			errs = append(errs, errors.New("OPERITAS_JIRA_WEBHOOK_SECRET is required when jira source is enabled"))
 		}
-		if cfg.Sources.Jira.BaseURL != "" && isKnownNonEUEndpoint(cfg.Sources.Jira.BaseURL) {
-			errs = append(errs, fmt.Errorf("sources.jira.base_url %q appears to be a non-EU endpoint", cfg.Sources.Jira.BaseURL))
-		}
-		if cfg.Sources.Jira.BaseURL != "" && strings.HasSuffix(strings.ToLower(extractHost(cfg.Sources.Jira.BaseURL)), ".atlassian.net") {
-			slog.Warn("jira base_url is an Atlassian Cloud host: EU data residency depends on the Atlassian tenant Data Residency setting, not the URL alone; verify your tenant's residency pin at admin.atlassian.com")
+		if cfg.Sources.Jira.BaseURL != "" {
+			// Fail-closed EU check; *.atlassian.net is on the acceptable list.
+			checkEUEndpoint("sources.jira.base_url", cfg.Sources.Jira.BaseURL)
+			if strings.HasSuffix(strings.ToLower(extractHost(cfg.Sources.Jira.BaseURL)), ".atlassian.net") {
+				slog.Warn("jira base_url is an Atlassian Cloud host: EU data residency depends on the Atlassian tenant Data Residency setting, not the URL alone; verify your tenant's residency pin at admin.atlassian.com")
+			}
 		}
 	}
 
@@ -1059,9 +1087,12 @@ func validate(cfg *Config) error {
 		if cfg.Sources.Datadog.WebhookSecret == "" {
 			errs = append(errs, errors.New("OPERITAS_DATADOG_WEBHOOK_SECRET is required when datadog source is enabled"))
 		}
-		if isKnownNonEUEndpoint(cfg.Sources.Datadog.APIBaseURL) ||
-			isKnownNonEUDatadogEndpoint(cfg.Sources.Datadog.APIBaseURL) {
+		// The Datadog API base URL has a dedicated deny-list for non-EU Datadog
+		// domains in addition to the generic fail-closed guard.
+		if isKnownNonEUDatadogEndpoint(cfg.Sources.Datadog.APIBaseURL) {
 			errs = append(errs, fmt.Errorf("sources.datadog.api_base_url %q is not an EU Datadog endpoint; use https://api.datadoghq.eu or https://api.eu1.datadoghq.com", cfg.Sources.Datadog.APIBaseURL))
+		} else {
+			checkEUEndpoint("sources.datadog.api_base_url", cfg.Sources.Datadog.APIBaseURL)
 		}
 	}
 
@@ -1082,15 +1113,16 @@ func validate(cfg *Config) error {
 		if cfg.Sources.Bitbucket.WebhookSecret == "" {
 			errs = append(errs, errors.New("OPERITAS_BITBUCKET_WEBHOOK_SECRET is required when bitbucket source is enabled"))
 		}
+		// api.bitbucket.org is on the acceptable list (documented ADR-0015 trade-off).
+		checkEUEndpoint("sources.bitbucket.base_url", cfg.Sources.Bitbucket.BaseURL)
 	}
 
 	if cfg.Sources.IncidentIO.Enabled {
 		if cfg.Sources.IncidentIO.WebhookSecret == "" {
 			errs = append(errs, errors.New("OPERITAS_INCIDENTIO_WEBHOOK_SECRET is required when incident_io source is enabled"))
 		}
-		if isKnownNonEUEndpoint(cfg.Sources.IncidentIO.APIBaseURL) {
-			errs = append(errs, fmt.Errorf("sources.incident_io.api_base_url %q appears to be a non-EU endpoint", cfg.Sources.IncidentIO.APIBaseURL))
-		}
+		// api.incident.io is on the acceptable list (EU-hosted SaaS).
+		checkEUEndpoint("sources.incident_io.api_base_url", cfg.Sources.IncidentIO.APIBaseURL)
 	}
 
 	if cfg.Sources.Opsgenie.Enabled {
@@ -1099,6 +1131,9 @@ func validate(cfg *Config) error {
 		}
 		if isKnownNonEUOpsgenieEndpoint(cfg.Sources.Opsgenie.APIBaseURL) {
 			errs = append(errs, fmt.Errorf("sources.opsgenie.api_base_url %q is not the EU Opsgenie endpoint; use https://api.eu.opsgenie.com/v2", cfg.Sources.Opsgenie.APIBaseURL))
+		} else {
+			// api.eu.opsgenie.com is on the acceptable list.
+			checkEUEndpoint("sources.opsgenie.api_base_url", cfg.Sources.Opsgenie.APIBaseURL)
 		}
 	}
 
@@ -1108,10 +1143,14 @@ func validate(cfg *Config) error {
 		}
 		if cfg.Sources.ServiceNow.BaseURL == "" {
 			errs = append(errs, errors.New("sources.servicenow.base_url is required when servicenow source is enabled"))
-		} else if isKnownNonEUEndpoint(cfg.Sources.ServiceNow.BaseURL) {
-			errs = append(errs, fmt.Errorf("sources.servicenow.base_url %q appears to be a non-EU endpoint", cfg.Sources.ServiceNow.BaseURL))
-		} else if strings.HasSuffix(strings.ToLower(extractHost(cfg.Sources.ServiceNow.BaseURL)), ".service-now.com") {
-			slog.Warn("servicenow base_url is a ServiceNow Cloud host: EU data residency depends on the ServiceNow instance's Data Center setting; verify your instance is provisioned in an EU data center")
+		} else {
+			// *.service-now.com is on the acceptable list; fail-closed for any
+			// other custom host. An EU self-hosted instance on a custom domain
+			// requires OPERITAS_ALLOW_NON_EU_ENDPOINT=1.
+			checkEUEndpoint("sources.servicenow.base_url", cfg.Sources.ServiceNow.BaseURL)
+			if strings.HasSuffix(strings.ToLower(extractHost(cfg.Sources.ServiceNow.BaseURL)), ".service-now.com") {
+				slog.Warn("servicenow base_url is a ServiceNow Cloud host: EU data residency depends on the ServiceNow instance's Data Center setting; verify your instance is provisioned in an EU data center")
+			}
 		}
 	}
 
@@ -1121,8 +1160,11 @@ func validate(cfg *Config) error {
 		}
 		if cfg.Sources.ArgoCD.BaseURL == "" {
 			errs = append(errs, errors.New("sources.argocd.base_url is required when argocd source is enabled"))
-		} else if isKnownNonEUEndpoint(cfg.Sources.ArgoCD.BaseURL) {
-			errs = append(errs, fmt.Errorf("sources.argocd.base_url %q appears to be a non-EU endpoint", cfg.Sources.ArgoCD.BaseURL))
+		} else {
+			// A typical Argo CD instance runs on the customer's EU cluster
+			// (e.g. argocd.example.eu). The .eu TLD is on the acceptable list.
+			// Custom non-.eu domains require OPERITAS_ALLOW_NON_EU_ENDPOINT=1.
+			checkEUEndpoint("sources.argocd.base_url", cfg.Sources.ArgoCD.BaseURL)
 		}
 	}
 
@@ -1156,12 +1198,24 @@ func validate(cfg *Config) error {
 }
 
 // isKnownNonEUEndpoint returns true if the endpoint URL string contains a
-// recognisable non-EU AWS region name. This is a safeguard, not a firewall;
-// the Helm NetworkPolicy is the real enforcement layer.
+// recognisable non-EU region or domain fragment. This is a deny-list safeguard;
+// the Helm NetworkPolicy is the primary enforcement layer. It is not exhaustive
+// — operators supplying custom hostnames must use isKnownAcceptableEndpoint to
+// vet them, or set OPERITAS_ALLOW_NON_EU_ENDPOINT=1 explicitly.
 func isKnownNonEUEndpoint(ep string) bool {
 	nonEUFragments := []string{
+		// AWS non-EU regions.
 		"us-east-", "us-west-", "ap-", "sa-east-", "ca-central-",
 		"me-", "af-south-", "il-central-",
+		// AWS GovCloud and China regions.
+		"us-gov-", "cn-north-", "cn-northwest-",
+		// Generic US-region patterns (SaaS and cloud vanity domains).
+		".us.", ".us/", ".us:", "-us.", "-us/",
+		// Common US-based SaaS region suffixes.
+		"us1.", "us2.", "us3.", "us4.", "us5.",
+		// Datadog US domains are caught by isKnownNonEUDatadogEndpoint but
+		// include here as belt-and-suspenders for the generic guard.
+		"datadoghq.com/",
 	}
 	lower := strings.ToLower(ep)
 	for _, frag := range nonEUFragments {
@@ -1169,6 +1223,72 @@ func isKnownNonEUEndpoint(ep string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// isKnownAcceptableEndpoint returns true if the endpoint host is on the vetted
+// list of EU-resident or explicitly-documented globally-acceptable SaaS/PaaS
+// endpoints used by the 16 supported sources.
+//
+// "Acceptable" does not mean unconditionally EU — it means the endpoint is
+// either clearly EU-resident (by TLD or region pattern) or is a global SaaS
+// whose non-EU hosting is a documented trade-off (e.g. metadata-only API paths,
+// no customer event data stored at rest on the provider side).
+//
+// Any host that is neither in this list nor caught by isKnownNonEUEndpoint is
+// considered unvetted and fails closed at startup unless the operator sets
+// OPERITAS_ALLOW_NON_EU_ENDPOINT=1.
+func isKnownAcceptableEndpoint(ep string) bool {
+	host := strings.ToLower(extractHost(ep))
+	if host == "" {
+		return false
+	}
+
+	// EU TLD: any host whose public suffix is .eu is EU-resident by definition.
+	if strings.HasSuffix(host, ".eu") || host == "eu" {
+		return true
+	}
+
+	// Known global SaaS/PaaS hosts explicitly documented in source package
+	// comments. Each entry has a rationale; the slice is ordered for clarity.
+	knownHosts := []string{
+		// Atlassian Cloud — Jira; EU data residency via tenant Data Residency
+		// setting at admin.atlassian.com (startup validation warns about this).
+		"atlassian.net",
+		// Bitbucket Cloud — documented ADR-0015 trade-off: no EU-specific API
+		// endpoint; collector reads metadata only, no event data stored there.
+		"api.bitbucket.org",
+		// Azure Resource Manager — global control-plane endpoint; EU data
+		// residency is enforced by subscription geography, not this endpoint.
+		// Only audit log metadata (timestamps, operation names) is fetched.
+		"management.azure.com",
+		// Azure identity / OIDC token endpoint — no customer data; auth only.
+		"login.microsoftonline.com",
+		// GitLab SaaS — EU data residency optional; operators with strict
+		// requirements should point to a self-hosted EU instance.
+		"gitlab.com",
+		// incident.io — EU-hosted SaaS by design; documented in package comment.
+		"api.incident.io",
+		// PagerDuty — no EU-specific REST API endpoint available; global SaaS.
+		"api.pagerduty.com",
+		// Datadog EU1 REST API endpoints.
+		"api.datadoghq.eu",
+		"api.eu1.datadoghq.com",
+		// Opsgenie EU REST API endpoint.
+		"api.eu.opsgenie.com",
+	}
+	for _, known := range knownHosts {
+		if host == known || strings.HasSuffix(host, "."+known) {
+			return true
+		}
+	}
+
+	// ServiceNow Cloud (*.service-now.com) — EU residency depends on the
+	// instance Data Center assignment; a startup warning is emitted separately.
+	if strings.HasSuffix(host, ".service-now.com") || host == "service-now.com" {
+		return true
+	}
+
 	return false
 }
 
@@ -1200,6 +1320,18 @@ func isKnownNonEUOpsgenieEndpoint(ep string) bool {
 		return false
 	}
 	return strings.Contains(lower, "opsgenie.com")
+}
+
+// IsKnownAcceptableEndpointForTest exposes isKnownAcceptableEndpoint for
+// external test packages. Not intended for production use.
+func IsKnownAcceptableEndpointForTest(ep string) bool {
+	return isKnownAcceptableEndpoint(ep)
+}
+
+// IsKnownNonEUEndpointForTest exposes isKnownNonEUEndpoint for external test
+// packages. Not intended for production use.
+func IsKnownNonEUEndpointForTest(ep string) bool {
+	return isKnownNonEUEndpoint(ep)
 }
 
 // extractHost returns the hostname from a URL string. Returns the raw string on

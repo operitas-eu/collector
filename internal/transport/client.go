@@ -69,6 +69,12 @@ type ClientConfig struct {
 	BatchFlushInterval time.Duration
 	BackoffInitial     time.Duration
 	BackoffMax         time.Duration
+
+	// PruneInterval controls how often walPrune and dlqPrune run during a
+	// live flush loop (perf-6). The prune policy enforces the 1 GiB / 14-day
+	// cap on disk usage even during long-running collector sessions.
+	// Zero means use the default of 4 hours.
+	PruneInterval time.Duration
 }
 
 // NewClient builds an mTLS HTTP client and starts the background flush loop.
@@ -247,14 +253,34 @@ func (c *Client) flushLoop(ctx context.Context) {
 	ticker := time.NewTicker(c.cfg.BatchFlushInterval)
 	defer ticker.Stop()
 
+	// perf-6: periodic WAL/DLQ prune so the 1 GiB / 14-day cap is enforced
+	// live, not only at startup. Default to 4 hours if not explicitly set.
+	pruneInterval := c.cfg.PruneInterval
+	if pruneInterval <= 0 {
+		pruneInterval = 4 * time.Hour
+	}
+	pruneTicker := time.NewTicker(pruneInterval)
+	defer pruneTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-c.done:
 			return
+
+		case <-pruneTicker.C:
+			c.runPrune()
+
 		case <-ticker.C:
 			if c.deauthorized.Load() {
+				// perf-5: spill any in-memory events to the WAL so they survive
+				// the deauth period and can be replayed after the operator rotates
+				// the API key and restarts. This prevents an unbounded in-memory
+				// buffer accumulation when the collector is deauthorized.
+				if err := c.spillToWAL(); err != nil {
+					slog.Error("post-deauth wal spill failed", "err", err)
+				}
 				// 401 received — stop delivering. Surface a loud log on every
 				// tick so the operator can see the problem without log flooding.
 				slog.Error("collector deauthorized: token revoked or missing — stop delivering batches; rotate the API key and restart the collector",
@@ -267,12 +293,61 @@ func (c *Client) flushLoop(ctx context.Context) {
 			}
 		case <-c.flushCh:
 			if c.deauthorized.Load() {
+				// perf-5: same WAL spill path for signal-triggered flushes.
+				if err := c.spillToWAL(); err != nil {
+					slog.Error("post-deauth wal spill failed (flushCh)", "err", err)
+				}
 				continue
 			}
 			if err := c.flush(ctx); err != nil {
 				slog.Error("flush error", "err", err)
 			}
 		}
+	}
+}
+
+// spillToWAL drains the in-memory event buffer into the WAL directory so that
+// events accumulated after a 401 deauthorization survive a restart and can be
+// replayed once the operator rotates the API key.
+//
+// This prevents the in-memory buffer from growing without bound during the
+// deauth period (perf-5). Each call writes at most one WAL entry covering
+// whatever is currently in the buffer.
+func (c *Client) spillToWAL() error {
+	c.mu.Lock()
+	if len(c.buf) == 0 {
+		c.mu.Unlock()
+		return nil
+	}
+	events := c.buf
+	c.buf = nil
+	c.bufBytes = 0
+	c.mu.Unlock()
+
+	batch := envelope.NewBatch(c.cfg.CollectorID, c.cfg.TenantID, events)
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		return fmt.Errorf("spill: marshal batch: %w", err)
+	}
+	key := uuid.NewString()
+	if err := walWrite(c.cfg.WALDir, key, payload); err != nil {
+		return fmt.Errorf("spill: wal write (key=%s): %w", key, err)
+	}
+	slog.Warn("post-deauth: spilled in-memory events to WAL for replay after key rotation",
+		"event_count", len(events),
+		"idempotency_key", key,
+	)
+	return nil
+}
+
+// runPrune enforces the 1 GiB / 14-day retention cap on the WAL and DLQ
+// directories during a live run (perf-6). Errors are logged and not fatal.
+func (c *Client) runPrune() {
+	if err := walPrune(c.cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
+		slog.Warn("live wal prune failed", "err", err)
+	}
+	if err := dlqPrune(c.cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
+		slog.Warn("live dlq prune failed", "err", err)
 	}
 }
 

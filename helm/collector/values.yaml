@@ -330,9 +330,14 @@ networkPolicy:
   # ingressCidr restricts who can reach the webhook ports. Set to the CIDR of
   # your GitHub/PagerDuty ingress controller or VPN tunnel.
   ingressCidr: ""
-  # egressCidr is the CIDR of the ingest endpoint. The collector uses DNS so
-  # you typically set this to the /32 of ingest.operitas.eu's resolved IP, or
-  # the VPN gateway.
+  # egressCidr is REQUIRED when networkPolicy.enabled=true.
+  # Set it to the resolved IP CIDR of the ingest endpoint so the NetworkPolicy
+  # restricts 443 egress to EU infrastructure only (EU-residency enforcement).
+  # Example: "1.2.3.4/32" for a single IP, or "1.2.3.0/24" for a range.
+  # An empty value causes helm template / helm install to fail with an error.
+  # To find the IP: dig +short ingest.operitas.eu
+  # If the CloudTrail S3 bucket is accessed via a VPC private-link endpoint,
+  # include that endpoint's CIDR here or add a second egress rule in an overlay.
   egressCidr: ""
 
 # Probe configuration.

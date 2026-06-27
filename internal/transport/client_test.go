@@ -617,6 +617,125 @@ func TestMissingAPIKeyNotLogged(t *testing.T) {
 	_ = cl.Close(context.Background())
 }
 
+// TestPost401SpillsToWAL verifies perf-5: after a 401 deauthorizes the client,
+// events that arrive via Send() are spilled to the WAL rather than accumulating
+// in memory unbounded. After the flush interval fires in deauth state the WAL
+// directory must contain at least one entry covering the events sent after the
+// 401.
+func TestPost401SpillsToWAL(t *testing.T) {
+	var attempts atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "unauthenticated"})
+	}))
+	defer srv.Close()
+
+	walDir := t.TempDir()
+	cfg := transport.TestClientConfig(srv.URL, walDir)
+	cfg.BackoffInitial = 10 * time.Millisecond
+	cfg.BackoffMax = 50 * time.Millisecond
+
+	cl, err := transport.NewTestClient(context.Background(), cfg, srv.Client())
+	if err != nil {
+		t.Fatalf("NewTestClient: %v", err)
+	}
+
+	now := time.Now().UTC()
+	// First event triggers the 401 and sets deauthorized.
+	cl.Send(envelope.Event{
+		OccurredAt:  now,
+		EventType:   "deploy.completed",
+		EventSource: envelope.SourceGitHub,
+		Payload:     map[string]any{"sha": "trigger-deauth"},
+	})
+
+	// Wait for deauth to be confirmed.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) && !cl.Deauthorized() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cl.Deauthorized() {
+		t.Fatal("collector should be deauthorized after 401 but Deauthorized() is still false")
+	}
+
+	// Send additional events while deauthorized. These must be spilled to WAL
+	// rather than buffered in memory forever.
+	for i := 0; i < 5; i++ {
+		cl.Send(envelope.Event{
+			OccurredAt:  now,
+			EventType:   "change.merged",
+			EventSource: envelope.SourceGitHub,
+			Payload:     map[string]any{"i": i},
+		})
+	}
+
+	// Allow the flush interval to fire once more (deauth path now calls spillToWAL).
+	time.Sleep(350 * time.Millisecond)
+	_ = cl.Close(context.Background())
+
+	// At least one WAL file must exist covering the post-deauth events.
+	walEntries, _ := os.ReadDir(walDir)
+	var walFiles []string
+	for _, e := range walEntries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".wal") {
+			walFiles = append(walFiles, e.Name())
+		}
+	}
+	if len(walFiles) == 0 {
+		t.Error("expected at least one WAL file after post-deauth spill, got none")
+	}
+}
+
+// TestLivePruneEnforcesCapDuringRun verifies perf-6: walPrune is called
+// periodically from the running flushLoop, not only at startup. The test
+// starts the client first (so the startup replayWAL sees an empty directory),
+// then injects an aged WAL file directly into the WAL directory, and confirms
+// that the live prune ticker removes it without requiring a restart.
+func TestLivePruneEnforcesCapDuringRun(t *testing.T) {
+	var received atomic.Int64
+	srv := newFakeIngest(t, http.StatusOK, &received)
+	defer srv.Close()
+
+	walDir := t.TempDir()
+	cfg := transport.TestClientConfig(srv.URL, walDir)
+	// PruneInterval is 200ms in TestClientConfig — short enough for this test.
+
+	// Start the client. replayWAL sees an empty WAL dir; no stale replay.
+	cl, err := transport.NewTestClient(context.Background(), cfg, srv.Client())
+	if err != nil {
+		t.Fatalf("NewTestClient: %v", err)
+	}
+
+	// Inject a stale WAL file AFTER the client has started (so it won't be
+	// picked up by the startup replay). walPrune reads the directory on each
+	// tick, so it will find and remove this file on the next prune run.
+	//
+	// The walEntry JSON format used by the internal wal.go package:
+	//   { "idempotency_key": "<uuid>", "payload": <BatchRequest JSON> }
+	// Payload must be a JSON object (json.RawMessage), not a JSON string.
+	staleKey := "00000000-0000-0000-0000-000000000099"
+	stalePath := filepath.Join(walDir, staleKey+".wal")
+	staleData := []byte(`{"idempotency_key":"` + staleKey + `","payload":{"collector_id":"test","tenant_id":"test","envelope_version":"1.0.0","events":[]}}`)
+	if err := os.WriteFile(stalePath, staleData, 0o600); err != nil {
+		t.Fatalf("write stale WAL file: %v", err)
+	}
+	// Backdate the file by 20 days so it crosses the 14-day age threshold.
+	twentyDaysAgo := time.Now().Add(-20 * 24 * time.Hour)
+	if err := os.Chtimes(stalePath, twentyDaysAgo, twentyDaysAgo); err != nil {
+		t.Fatalf("chtimes stale WAL file: %v", err)
+	}
+
+	// Wait for at least two PruneInterval ticks (200ms each) to fire.
+	time.Sleep(600 * time.Millisecond)
+	_ = cl.Close(context.Background())
+
+	// The stale WAL file must have been pruned by the live ticker.
+	if _, statErr := os.Stat(stalePath); !os.IsNotExist(statErr) {
+		t.Errorf("stale WAL file should have been pruned during live run; stat error: %v", statErr)
+	}
+}
+
 func writeTempFile(t *testing.T, data []byte) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "cert*.der")

@@ -31,6 +31,9 @@ func TestClientConfig(url, walDir string) ClientConfig {
 		BatchFlushInterval: 100 * time.Millisecond,
 		BackoffInitial:     50 * time.Millisecond,
 		BackoffMax:         200 * time.Millisecond,
+		// Short prune interval so perf-6 tests can verify live pruning
+		// without waiting hours.
+		PruneInterval: 200 * time.Millisecond,
 	}
 }
 

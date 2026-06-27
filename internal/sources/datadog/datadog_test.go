@@ -2,11 +2,14 @@ package datadog_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"operitas.eu/collector/internal/config"
 	"operitas.eu/collector/internal/envelope"
@@ -165,5 +168,62 @@ func TestWebhookHandler_MethodNotAllowed(t *testing.T) {
 	src.HandleWebhookForTest(w, req)
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", w.Code)
+	}
+}
+
+// TestPollRedirectNotFollowed verifies that the Datadog REST poller does NOT
+// follow a 302 redirect and does NOT send credential headers (DD-API-KEY,
+// DD-APPLICATION-KEY) to the redirect target. This exercises security-1:
+// CheckRedirect = http.ErrUseLastResponse on the source's http.Client.
+func TestPollRedirectNotFollowed(t *testing.T) {
+	// redirectTarget counts hits and records any DD-API-KEY header it receives.
+	var targetHits atomic.Int64
+	var targetAPIKey atomic.Value
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		targetAPIKey.Store(r.Header.Get("DD-API-KEY"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer target.Close()
+
+	// primary always returns 302 pointing at target.
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/api/v1/events", http.StatusFound)
+	}))
+	defer primary.Close()
+
+	r, err := redact.New(false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DatadogConfig{
+		Enabled:      true,
+		APIBaseURL:   primary.URL,
+		APIKey:       "secret-api-key",
+		AppKey:       "secret-app-key",
+		PollLookback: time.Hour,
+		PollInterval: 5 * time.Minute,
+	}
+	var emitted []envelope.Event
+	src := datadog.New(cfg, r, func(e envelope.Event) { emitted = append(emitted, e) })
+
+	// PollForTest executes exactly one poll cycle against primary, which
+	// returns 302. With CheckRedirect = http.ErrUseLastResponse the client
+	// must stop at the 3xx and return an error to the poller (non-2xx status).
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// poll() returns an error on non-2xx; we only care that no redirect hit target.
+	_ = src.PollForTest(ctx)
+
+	if got := targetHits.Load(); got != 0 {
+		t.Errorf("redirect was followed: redirect target received %d request(s)", got)
+	}
+	if key, _ := targetAPIKey.Load().(string); key != "" {
+		t.Errorf("DD-API-KEY credential reached redirect target: %q", key)
+	}
+	// No events should be emitted from a redirect response.
+	if len(emitted) != 0 {
+		t.Errorf("expected 0 events from a redirect response, got %d", len(emitted))
 	}
 }

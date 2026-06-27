@@ -69,6 +69,14 @@ func New(cfg config.DatadogConfig, r *redact.Redactor, emit func(envelope.Event)
 
 func newHTTPClient() *http.Client {
 	return &http.Client{
+		// Never follow redirects. A 302 from the vendor API could send
+		// DD-API-KEY / DD-APPLICATION-KEY headers to an attacker-controlled
+		// host if the redirect crosses a host boundary. Returning
+		// http.ErrUseLastResponse causes the caller to see the 3xx and treat
+		// it as a non-2xx error — no credentials are forwarded.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			TLSHandshakeTimeout:   10 * time.Second,
@@ -384,4 +392,11 @@ func VerifyAPIKeyHeader(secret, headerValue string) bool {
 // test packages. This avoids requiring a running HTTP server in unit tests.
 func (s *Source) HandleWebhookForTest(w http.ResponseWriter, r *http.Request) {
 	s.handleWebhook(w, r)
+}
+
+// PollForTest triggers a single poll cycle and returns any error. Intended only
+// for use in external test packages to verify poller behaviour (e.g. redirect
+// refusal) without starting the full RunPoller ticker loop.
+func (s *Source) PollForTest(ctx context.Context) error {
+	return s.poll(ctx)
 }
