@@ -6,10 +6,28 @@
 // Fields treated as PII by this package:
 //   - Email addresses (detected by RFC 5322 structure)
 //   - IPv4 and IPv6 addresses
+//   - AWS access key IDs (AKIA/ABIA/ACCA/ASIA prefix, 20 characters total)
 //
 // The redaction walk is applied recursively to the entire payload map. Keys are
 // never redacted — only leaf string values. Non-string values are not redacted
 // (numbers, booleans, etc. are not considered PII by default).
+//
+// CORRECTNESS GUARANTEE: for any input string, the redacted output is byte-identical
+// to the input except for the redacted tokens themselves. Whitespace (tabs, newlines,
+// multi-space runs) is always preserved exactly. No whitespace collapse occurs.
+//
+// BEHAVIORAL EXPANSION vs prior implementation: the previous redactor split strings on
+// whitespace boundaries (strings.Fields), so IP-shaped sequences embedded inside
+// compound non-whitespace tokens — e.g. the "7.68.0.5" in "curl/7.68.0.5", the
+// "1.2.3.4" in "v1.2.3.4" or "libssl.so.1.2.3.4" — were NOT redacted. This
+// implementation uses regex matching and redacts every syntactically valid IP regardless
+// of token boundaries. This is the correct privacy-first choice (an unredacted embedded
+// real IP is a PII leak into the evidence ledger), but it introduces a verification-
+// mismatch class that is distinct from the whitespace-collapse bug this commit fixes:
+// evidence-ledger records produced by the OLD redactor for payloads containing
+// IP-shaped sub-tokens are NOT re-derivable via this redactor. Operators who need to
+// verify pre-upgrade ledger records containing such payloads must use the redactor
+// version that was active when those records were hashed.
 package redact
 
 import (
@@ -27,6 +45,28 @@ import (
 var emailPattern = regexp.MustCompile(
 	`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`,
 )
+
+// ipv4CandidateRE matches dot-decimal candidate strings that may be IPv4
+// addresses. Candidates are validated with net.ParseIP before redaction.
+// An additional trailing-character check (see applyIPv4) rejects sequences
+// like "1.2.3.4.5" where the match is a prefix of a longer dotted token.
+var ipv4CandidateRE = regexp.MustCompile(`\d{1,3}(?:\.\d{1,3}){3}`)
+
+// ipv6CandidateRE matches colon-hex candidate strings that may be IPv6
+// addresses (requires at least two colon-separated groups, which means at
+// least two colons). Candidates are validated with net.ParseIP and confirmed
+// to be pure-IPv6 (ip.To4()==nil) so that IPv4 addresses already handled by
+// applyIPv4 are not double-processed.
+var ipv6CandidateRE = regexp.MustCompile(
+	`[0-9a-fA-F]{0,4}(?::[0-9a-fA-F]{0,4}){2,7}`,
+)
+
+// awsKeyIDRE matches AWS access key ID prefixes (AKIA/ABIA/ACCA/ASIA followed
+// by 16 uppercase alphanumeric characters, total 20 chars). These appear in
+// CloudTrail requestParameters and similar event metadata when IAM credentials
+// are referenced. The prefix is highly distinctive; no net.Parse validation
+// is required.
+var awsKeyIDRE = regexp.MustCompile(`(?:AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}`)
 
 // Redactor applies PII redaction rules to payload maps.
 type Redactor struct {
@@ -81,34 +121,101 @@ func (r *Redactor) redactValue(v any) any {
 	}
 }
 
+// redactString replaces all PII tokens in s with redaction markers. The
+// returned string is byte-identical to s except for the replaced tokens;
+// whitespace (tabs, newlines, multi-space runs) and all other non-PII bytes
+// are preserved exactly.
 func (r *Redactor) redactString(s string) string {
 	// Cheap pre-check — every leaf string flows through here, but PII requires
-	// either an '@' (email) or a digit (IPv4) or ':' (IPv6).
+	// either an '@' (email), a digit (IPv4/IPv6 numerals; AWS access key IDs
+	// always contain at least one character from the base-32 digit set {2,3,4,5,6,7}),
+	// or ':' (IPv6).
 	if !strings.ContainsAny(s, "@0123456789:") {
 		return s
 	}
-	s = emailPattern.ReplaceAllStringFunc(s, func(match string) string {
-		return r.sanitize(match)
-	})
 
-	// Replace IPv4 and IPv6 addresses. We walk token by token to avoid
-	// false-positives on version strings like "1.2.3.4" that appear in
-	// non-IP contexts. net.ParseIP is the authoritative parser.
-	parts := strings.Fields(s)
-	changed := false
-	for i, part := range parts {
-		// Strip trailing punctuation (comma, period, colon) before parsing.
-		clean := strings.TrimRight(part, ",:;.")
-		if ip := net.ParseIP(clean); ip != nil {
-			parts[i] = r.sanitize(clean) + part[len(clean):]
-			changed = true
-		}
-	}
-	if changed {
-		s = strings.Join(parts, " ")
-	}
+	// Email: ReplaceAllStringFunc already preserves all surrounding bytes.
+	s = emailPattern.ReplaceAllStringFunc(s, r.sanitize)
+
+	// IPv4: in-place substitution via FindAllStringIndex; trailing-char guard
+	// prevents false positives on dotted sequences like "1.2.3.4.5".
+	// Must run before IPv6 so that IPv4-mapped addresses (::ffff:a.b.c.d) have
+	// their dotted-decimal part handled first.
+	s = r.applyIPv4(s)
+
+	// IPv6: in-place substitution; net.ParseIP + To4()==nil confirms pure-IPv6.
+	s = r.applyIPv6(s)
+
+	// AWS access key IDs: distinctive 4-char prefix makes further validation
+	// unnecessary; ReplaceAllStringFunc preserves all surrounding bytes.
+	s = awsKeyIDRE.ReplaceAllStringFunc(s, r.sanitize)
 
 	return s
+}
+
+// applyIPv4 replaces all valid IPv4 addresses in s with the sanitized marker.
+// It uses FindAllStringIndex rather than ReplaceAllStringFunc so that it can
+// inspect the character immediately after each candidate match. If that
+// character is '.' or a decimal digit the candidate is not a terminal IP
+// address (e.g. it is the prefix of "1.2.3.4.5") and is left unchanged.
+// All bytes outside matched tokens — including whitespace, tabs, and newlines —
+// are written back to the output without modification.
+func (r *Redactor) applyIPv4(s string) string {
+	locs := ipv4CandidateRE.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, loc := range locs {
+		start, end := loc[0], loc[1]
+		// Preserve every byte from the previous position up to this candidate.
+		b.WriteString(s[pos:start])
+		match := s[start:end]
+		// Reject the candidate if it is immediately followed by '.' or a digit.
+		// This prevents "1.2.3.4" from being redacted out of "1.2.3.4.5".
+		trailingDotOrDigit := end < len(s) && (s[end] == '.' || (s[end] >= '0' && s[end] <= '9'))
+		if !trailingDotOrDigit && net.ParseIP(match) != nil {
+			b.WriteString(r.sanitize(match))
+		} else {
+			b.WriteString(match)
+		}
+		pos = end
+	}
+	// Preserve the remainder of the string after the last candidate.
+	b.WriteString(s[pos:])
+	return b.String()
+}
+
+// applyIPv6 replaces all valid IPv6 addresses in s with the sanitized marker.
+// Candidates are validated with net.ParseIP; ip.To4()==nil ensures that IPv4
+// addresses (already handled by applyIPv4) are not double-processed.
+// All bytes outside matched tokens are written back without modification.
+func (r *Redactor) applyIPv6(s string) string {
+	locs := ipv6CandidateRE.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	pos := 0
+	for _, loc := range locs {
+		start, end := loc[0], loc[1]
+		b.WriteString(s[pos:start])
+		match := s[start:end]
+		ip := net.ParseIP(match)
+		// ip.To4() returns nil only for pure IPv6; IPv4 and IPv4-in-IPv6 forms
+		// (the dotted-decimal parts of ::ffff:a.b.c.d) are already handled.
+		if ip != nil && ip.To4() == nil {
+			b.WriteString(r.sanitize(match))
+		} else {
+			b.WriteString(match)
+		}
+		pos = end
+	}
+	b.WriteString(s[pos:])
+	return b.String()
 }
 
 func (r *Redactor) sanitize(pii string) string {
