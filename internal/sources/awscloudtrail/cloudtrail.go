@@ -24,9 +24,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -83,12 +84,35 @@ func (s *Source) writeCursor() {
 		return
 	}
 	tmp := s.cursorPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(s.lastKey), 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		slog.Warn("cloudtrail: cursor open tmp failed", "err", err)
+		return
+	}
+	if _, err := f.Write([]byte(s.lastKey)); err != nil {
+		f.Close()
 		slog.Warn("cloudtrail: cursor write failed", "err", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		slog.Warn("cloudtrail: cursor fsync failed", "err", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		slog.Warn("cloudtrail: cursor close failed", "err", err)
 		return
 	}
 	if err := os.Rename(tmp, s.cursorPath); err != nil {
 		slog.Warn("cloudtrail: cursor rename failed", "err", err)
+		return
+	}
+	// fsync the parent directory so the directory entry for the rename is
+	// durable across a crash. Mirrors the WAL durability pattern in
+	// internal/transport/wal.go.
+	if d, err := os.Open(filepath.Dir(s.cursorPath)); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 }
 
@@ -133,7 +157,7 @@ func (s *Source) poll(ctx context.Context) error {
 		sem := make(chan struct{}, maxConcurrent)
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		var maxKey string
+		var failedKeys []string
 		for _, key := range keys {
 			wg.Add(1)
 			sem <- struct{}{}
@@ -142,22 +166,57 @@ func (s *Source) poll(ctx context.Context) error {
 				defer func() { <-sem }()
 				if err := s.processObject(ctx, key); err != nil {
 					slog.Error("cloudtrail: process object failed", "key", key, "err", err)
-					return
+					mu.Lock()
+					failedKeys = append(failedKeys, key)
+					mu.Unlock()
 				}
-				mu.Lock()
-				if key > maxKey {
-					maxKey = key
-				}
-				mu.Unlock()
 			}(key)
 		}
 		wg.Wait()
-		if maxKey > s.lastKey {
-			s.lastKey = maxKey
+		// Fail-closed: only advance the cursor as far as we can without
+		// skipping any failed key. advanceCursor returns s.lastKey unchanged
+		// when no forward progress is possible.
+		if newKey := advanceCursor(keys, failedKeys, s.lastKey); newKey != s.lastKey {
+			s.lastKey = newKey
 			s.writeCursor()
 		}
 	}
 	return nil
+}
+
+// advanceCursor returns the new cursor key after processing a page. It is
+// fail-closed: if any key failed to process, the cursor never advances past
+// or over that key, so the next poll re-lists and retries it.
+//
+// pageKeys must be the sorted S3 keys from the page (S3 returns them in
+// lexicographic order). failedKeys is the unordered set of keys that returned
+// an error from processObject. current is the cursor before this page.
+//
+// The return value equals current when no forward progress is possible (all
+// keys failed, or the first key failed with no prior successes on the page).
+func advanceCursor(pageKeys, failedKeys []string, current string) string {
+	if len(failedKeys) == 0 {
+		// Happy path: advance to the largest key seen on this page.
+		best := current
+		for _, k := range pageKeys {
+			if k > best {
+				best = k
+			}
+		}
+		return best
+	}
+	// Find the minimum failed key so we know where to stop.
+	sort.Strings(failedKeys)
+	minFailed := failedKeys[0]
+	// Advance to the largest key that is strictly below minFailed so that
+	// minFailed (and every key after it) will be re-listed on the next poll.
+	best := current
+	for _, k := range pageKeys {
+		if k < minFailed && k > best {
+			best = k
+		}
+	}
+	return best
 }
 
 func (s *Source) processObject(ctx context.Context, key string) error {
@@ -177,14 +236,12 @@ func (s *Source) processObject(ctx context.Context, key string) error {
 	}
 	defer gz.Close()
 
-	body, err := io.ReadAll(io.LimitReader(gz, 50*1024*1024)) // 50 MB safety limit
-	if err != nil {
-		return fmt.Errorf("read gzip body: %w", err)
-	}
-
+	// Stream-decode directly from the gzip reader. This avoids the former
+	// io.LimitReader(50 MB) cap that silently dropped events beyond the limit.
+	// CloudTrail log files are bounded in practice but we must not drop data.
 	var logFile cloudTrailLog
-	if err := json.Unmarshal(body, &logFile); err != nil {
-		return fmt.Errorf("unmarshal cloudtrail log: %w", err)
+	if err := json.NewDecoder(gz).Decode(&logFile); err != nil {
+		return fmt.Errorf("decode cloudtrail log: %w", err)
 	}
 
 	slog.Debug("cloudtrail: processing object", "key", key, "record_count", len(logFile.Records))

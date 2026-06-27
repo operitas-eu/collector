@@ -28,7 +28,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"operitas.eu/collector/internal/config"
@@ -41,15 +44,19 @@ import (
 
 // Source receives GitLab webhook events and/or polls the REST API.
 type Source struct {
-	cfg    config.GitLabConfig
-	http   *http.Client
-	redact *redact.Redactor
-	emit   func(envelope.Event)
+	cfg        config.GitLabConfig
+	http       *http.Client
+	redact     *redact.Redactor
+	emit       func(envelope.Event)
+	cursorPath string
+	// lastPollAt is the start time of the last successful poll, persisted to
+	// cursorPath so restarts resume from where they left off.
+	lastPollAt time.Time
 }
 
 // New constructs a GitLab source.
 func New(cfg config.GitLabConfig, r *redact.Redactor, emit func(envelope.Event)) *Source {
-	return &Source{
+	s := &Source{
 		cfg: cfg,
 		http: &http.Client{
 			Timeout: 30 * time.Second,
@@ -60,8 +67,76 @@ func New(cfg config.GitLabConfig, r *redact.Redactor, emit func(envelope.Event))
 				MaxIdleConnsPerHost:   8,
 			},
 		},
-		redact: r,
-		emit:   emit,
+		redact:     r,
+		emit:       emit,
+		cursorPath: cfg.CursorPath,
+	}
+	s.loadCursor()
+	return s
+}
+
+// WebhookActive reports whether the webhook receiver is configured. When true,
+// the poller must NOT be started to prevent the same event appearing twice in
+// the tamper-evident ledger. main.go gates RunPoller on !s.WebhookActive().
+func (s *Source) WebhookActive() bool {
+	return s.cfg.WebhookSecret != ""
+}
+
+func (s *Source) loadCursor() {
+	if s.cursorPath == "" {
+		return
+	}
+	data, err := os.ReadFile(s.cursorPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("gitlab: cursor read failed; starting from lookback window",
+				"path", s.cursorPath, "err", err)
+		}
+		return
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(data)))
+	if err != nil {
+		slog.Warn("gitlab: cursor parse failed; starting from lookback window",
+			"path", s.cursorPath, "err", err)
+		return
+	}
+	s.lastPollAt = t
+}
+
+// writeCursor persists the lastPollAt timestamp durably (open+write+fsync+
+// close+rename+dir-fsync), matching the WAL pattern in internal/transport/wal.go.
+func (s *Source) writeCursor() {
+	if s.cursorPath == "" || s.lastPollAt.IsZero() {
+		return
+	}
+	tmp := s.cursorPath + ".tmp"
+	val := s.lastPollAt.UTC().Format(time.RFC3339Nano)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		slog.Warn("gitlab: cursor open tmp failed", "err", err)
+		return
+	}
+	if _, err := f.Write([]byte(val)); err != nil {
+		f.Close()
+		slog.Warn("gitlab: cursor write failed", "err", err)
+		return
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		slog.Warn("gitlab: cursor fsync failed", "err", err)
+		return
+	}
+	if err := f.Close(); err != nil {
+		slog.Warn("gitlab: cursor close failed", "err", err)
+		return
+	}
+	if err := os.Rename(tmp, s.cursorPath); err != nil {
+		slog.Warn("gitlab: cursor rename failed", "err", err)
+		return
+	}
+	if d, err := os.Open(filepath.Dir(s.cursorPath)); err == nil {
+		_ = d.Sync()
+		d.Close()
 	}
 }
 
@@ -85,14 +160,19 @@ func (s *Source) RunPoller(ctx context.Context) error {
 }
 
 func (s *Source) poll(ctx context.Context) error {
+	pollStart := time.Now().UTC()
+
+	// Use the persisted cursor when available; fall back to a 2x-interval
+	// lookback window on first run to avoid a flood of historical events.
+	since := s.lastPollAt
+	if since.IsZero() {
+		since = pollStart.Add(-s.cfg.PollInterval * 2)
+	}
+
 	projects, err := s.listProjects(ctx)
 	if err != nil {
 		return err
 	}
-
-	// Look slightly further back than the poll interval to tolerate clock skew
-	// and ensure no event is missed between ticks. Mirrors the github source.
-	since := time.Now().UTC().Add(-s.cfg.PollInterval * 2)
 
 	for _, p := range projects {
 		if err := s.pollMRs(ctx, p, since); err != nil {
@@ -102,6 +182,12 @@ func (s *Source) poll(ctx context.Context) error {
 			slog.Error("gitlab: poll deployments failed", "project", p.path(), "err", err)
 		}
 	}
+
+	// Advance the cursor to this poll's start time so the next poll covers
+	// [pollStart, nextPollStart].  Duplicate events from the overlap window
+	// are tolerated; gaps would be permanent evidence loss.
+	s.lastPollAt = pollStart
+	s.writeCursor()
 	return nil
 }
 
