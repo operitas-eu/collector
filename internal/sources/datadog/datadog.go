@@ -393,10 +393,3 @@ func VerifyAPIKeyHeader(secret, headerValue string) bool {
 func (s *Source) HandleWebhookForTest(w http.ResponseWriter, r *http.Request) {
 	s.handleWebhook(w, r)
 }
-
-// PollForTest triggers a single poll cycle and returns any error. Intended only
-// for use in external test packages to verify poller behaviour (e.g. redirect
-// refusal) without starting the full RunPoller ticker loop.
-func (s *Source) PollForTest(ctx context.Context) error {
-	return s.poll(ctx)
-}

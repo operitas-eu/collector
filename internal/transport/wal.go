@@ -85,13 +85,21 @@ func walDelete(dir, idempotencyKey string) error {
 // maxBytes, deletes oldest-first until under cap. A WAL spool that grows
 // without bound is a worse failure mode than dropping ancient batches the
 // ingest API would reject as stale anyway.
-func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
+//
+// WARNING — evidence-window implication: WAL entries that are pruned here have
+// never been acknowledged by the ingest ledger. Pruning them is permanent and
+// unrecoverable data loss from the regulatory audit trail. This function
+// returns the number of pruned entries so callers can emit a loud WARN log
+// (runPrune does this; the startup prune in NewClient also logs the count).
+// The operitas_collector_wal_pruned_total Prometheus counter tracks cumulative
+// pruned counts for alerting.
+func walPrune(dir string, maxAge time.Duration, maxBytes int64) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return 0, nil
 		}
-		return fmt.Errorf("wal prune readdir: %w", err)
+		return 0, fmt.Errorf("wal prune readdir: %w", err)
 	}
 	type fileInfo struct {
 		path    string
@@ -99,6 +107,7 @@ func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 		modTime time.Time
 	}
 	var files []fileInfo
+	pruned := 0
 	cutoff := time.Now().Add(-maxAge)
 	for _, de := range entries {
 		if de.IsDir() || filepath.Ext(de.Name()) != walExt {
@@ -115,20 +124,22 @@ func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 				continue
 			}
 			incWALPrunedByAge()
-			slog.Info("wal: pruned aged entry", "path", path, "age", time.Since(info.ModTime()))
+			pruned++
+			slog.Warn("wal: dropped undelivered WAL entry (age cap exceeded); evidence may not reach the ingest ledger",
+				"path", path, "age", time.Since(info.ModTime()))
 			continue
 		}
 		files = append(files, fileInfo{path: path, size: info.Size(), modTime: info.ModTime()})
 	}
 	if maxBytes <= 0 {
-		return nil
+		return pruned, nil
 	}
 	var total int64
 	for _, f := range files {
 		total += f.size
 	}
 	if total <= maxBytes {
-		return nil
+		return pruned, nil
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].modTime.Before(files[j].modTime) })
 	for _, f := range files {
@@ -140,10 +151,12 @@ func walPrune(dir string, maxAge time.Duration, maxBytes int64) error {
 			continue
 		}
 		incWALPrunedBySize()
-		slog.Info("wal: pruned oversized spool entry", "path", f.path, "size", f.size)
+		pruned++
+		slog.Warn("wal: dropped undelivered WAL entry (size cap exceeded); evidence may not reach the ingest ledger",
+			"path", f.path, "size", f.size)
 		total -= f.size
 	}
-	return nil
+	return pruned, nil
 }
 
 // walRecover reads all pending WAL entries. Called on startup to replay

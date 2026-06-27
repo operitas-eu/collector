@@ -102,13 +102,21 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		done:    make(chan struct{}),
 	}
 
-	// Drop stale or oversized WAL entries before replaying.
-	if err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
+	// Drop stale or oversized WAL entries before replaying. Any entry pruned
+	// here was never acknowledged by the ingest ledger; log the count loudly
+	// so operators are aware of potential evidence loss on startup.
+	if walDropped, err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
 		slog.Warn("wal prune failed", "err", err)
+	} else if walDropped > 0 {
+		slog.Warn("startup: dropped undelivered WAL entries before replay; evidence dropped before delivery",
+			"dropped_count", walDropped)
 	}
 	// Prune DLQ with identical policy: 14-day age + 1 GiB cap.
-	if err := dlqPrune(cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
+	if dlqDropped, err := dlqPrune(cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
 		slog.Warn("dlq prune failed", "err", err)
+	} else if dlqDropped > 0 {
+		slog.Warn("startup: dropped DLQ entries; evidence dropped before delivery",
+			"dropped_count", dlqDropped)
 	}
 
 	if err := c.replayWAL(ctx); err != nil {
@@ -238,11 +246,17 @@ func NewClientNoMTLS(cfg ClientConfig) (*Client, error) {
 		done:    make(chan struct{}),
 	}
 
-	if err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
+	if walDropped, err := walPrune(cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
 		slog.Warn("wal prune failed", "err", err)
+	} else if walDropped > 0 {
+		slog.Warn("startup: dropped undelivered WAL entries before replay; evidence dropped before delivery",
+			"dropped_count", walDropped)
 	}
-	if err := dlqPrune(cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
+	if dlqDropped, err := dlqPrune(cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
 		slog.Warn("dlq prune failed", "err", err)
+	} else if dlqDropped > 0 {
+		slog.Warn("startup: dropped DLQ entries; evidence dropped before delivery",
+			"dropped_count", dlqDropped)
 	}
 
 	return c, nil
@@ -342,12 +356,29 @@ func (c *Client) spillToWAL() error {
 
 // runPrune enforces the 1 GiB / 14-day retention cap on the WAL and DLQ
 // directories during a live run (perf-6). Errors are logged and not fatal.
+//
+// Evidence-window implication: entries pruned here were never acknowledged by
+// the ingest ledger. Combined with the post-deauth WAL spill (perf-5), a
+// collector that stays deauthorized for more than 14 days will lose evidence
+// permanently. The WARN below is intentionally loud so operators notice before
+// the window expires. The operitas_collector_wal_pruned_total counter tracks
+// cumulative counts for alerting.
 func (c *Client) runPrune() {
-	if err := walPrune(c.cfg.WALDir, 14*24*time.Hour, 1<<30); err != nil {
+	walDropped, err := walPrune(c.cfg.WALDir, 14*24*time.Hour, 1<<30)
+	if err != nil {
 		slog.Warn("live wal prune failed", "err", err)
 	}
-	if err := dlqPrune(c.cfg.DLQDir, dlqMaxAge, dlqMaxBytes); err != nil {
+	dlqDropped, err := dlqPrune(c.cfg.DLQDir, dlqMaxAge, dlqMaxBytes)
+	if err != nil {
 		slog.Warn("live dlq prune failed", "err", err)
+	}
+	if walDropped+dlqDropped > 0 {
+		// This is the primary loss signal. It fires once per prune cycle that
+		// actually drops entries, so the log is loud but not spammy.
+		slog.Warn("evidence dropped before delivery: WAL/DLQ entries pruned without acknowledgement by the ingest ledger; this data cannot be recovered — rotate the API key and restart the collector to prevent further loss",
+			"wal_dropped", walDropped,
+			"dlq_dropped", dlqDropped,
+		)
 	}
 }
 

@@ -101,7 +101,7 @@ func TestWALMetrics_PruneBucketsByReason(t *testing.T) {
 
 	// maxAge=24h evicts "old"; maxBytes=600 evicts the older surviving
 	// entry to bring total below cap. Counters split accordingly.
-	if err := walPrune(dir, 24*time.Hour, 600); err != nil {
+	if _, err := walPrune(dir, 24*time.Hour, 600); err != nil {
 		t.Fatalf("walPrune: %v", err)
 	}
 	if got := walPrunedByAge.Load(); got != 1 {

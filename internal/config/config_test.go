@@ -303,6 +303,62 @@ func TestKnownEUEndpointsPassWithoutFlag(t *testing.T) {
 	}
 }
 
+// TestNewNonEUDenyListPatterns verifies every new deny-list fragment added in
+// PR-C2 is correctly detected as non-EU. These patterns are new and were not
+// covered by the earlier TestKnownEUEndpointsPassWithoutFlag test.
+// IsKnownNonEUEndpointForTest is defined in export_test.go.
+func TestNewNonEUDenyListPatterns(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		want bool // true means the host must be rejected as non-EU
+	}{
+		// US GovCloud fragments
+		{"us-gov prefix", "https://s3.us-gov-west-1.amazonaws.com/bucket", true},
+		{"us-gov-east", "https://sts.us-gov-east-1.amazonaws.com", true},
+
+		// China region fragments
+		{"cn-north", "https://s3.cn-north-1.amazonaws.com.cn/bucket", true},
+		{"cn-northwest", "https://s3.cn-northwest-1.amazonaws.com.cn/bucket", true},
+
+		// .us. / .us: / .us/ dot-separated fragments
+		{"dot-us-dot", "https://ingest.us.example.com/events", true},
+		{"dot-us-slash", "https://ingest.us/events", true},
+		{"dot-us-colon", "https://ingest.us:8443/events", true},
+
+		// -us. / -us/ dash-separated fragments
+		{"dash-us-dot", "https://api-us.example.com/v1", true},
+		{"dash-us-slash", "https://api-us/events", true},
+
+		// us1.–us5. numeric regional variants
+		{"us1 prefix", "https://us1.example.com/api", true},
+		{"us2 prefix", "https://us2.example.com/api", true},
+		{"us3 prefix", "https://us3.example.com/api", true},
+		{"us4 prefix", "https://us4.example.com/api", true},
+		{"us5 prefix", "https://us5.example.com/api", true},
+
+		// Datadog US guard (datadoghq.com without .eu or eu1. prefix)
+		{"datadoghq-us", "https://api.datadoghq.com/api/v1", true},
+		{"datadoghq-us-subdomain", "https://app.datadoghq.com/logs", true},
+
+		// Negative cases — these must NOT be flagged as non-EU
+		{"eu-tld fine", "https://argocd.example.eu", false},
+		{"datadoghq-eu fine", "https://api.datadoghq.eu", false},
+		{"datadoghq-eu1 fine", "https://api.eu1.datadoghq.com", false},
+		{"atlassian-net fine", "https://company.atlassian.net", false},
+		{"us in path only", "https://api.example.com/api/us/events", false},
+		{"username fine", "https://api.example.eu/api", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := config.IsKnownNonEUEndpointForTest(tc.host)
+			if got != tc.want {
+				t.Errorf("IsKnownNonEUEndpoint(%q) = %v, want %v", tc.host, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestAPIKeyNeverAppearsInValidationError ensures that the raw key value is
 // never echoed back in any error string. The validation only checks for
 // presence, not format, so there is no format-error path that could leak the

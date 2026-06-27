@@ -1322,18 +1322,6 @@ func isKnownNonEUOpsgenieEndpoint(ep string) bool {
 	return strings.Contains(lower, "opsgenie.com")
 }
 
-// IsKnownAcceptableEndpointForTest exposes isKnownAcceptableEndpoint for
-// external test packages. Not intended for production use.
-func IsKnownAcceptableEndpointForTest(ep string) bool {
-	return isKnownAcceptableEndpoint(ep)
-}
-
-// IsKnownNonEUEndpointForTest exposes isKnownNonEUEndpoint for external test
-// packages. Not intended for production use.
-func IsKnownNonEUEndpointForTest(ep string) bool {
-	return isKnownNonEUEndpoint(ep)
-}
-
 // extractHost returns the hostname from a URL string. Returns the raw string on
 // parse failure so callers can still do suffix checks safely.
 func extractHost(rawURL string) string {
