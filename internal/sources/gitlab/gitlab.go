@@ -174,18 +174,27 @@ func (s *Source) poll(ctx context.Context) error {
 		return err
 	}
 
+	// Fail-closed: track whether any per-project fetch failed. If so, the
+	// cursor is NOT advanced so PollLoop retries the same window next tick.
+	// At-least-once with ledger-level deduplication is correct; a gap is not.
+	var pollErr error
 	for _, p := range projects {
 		if err := s.pollMRs(ctx, p, since); err != nil {
 			slog.Error("gitlab: poll MRs failed", "project", p.path(), "err", err)
+			pollErr = err
 		}
 		if err := s.pollDeployments(ctx, p, since); err != nil {
 			slog.Error("gitlab: poll deployments failed", "project", p.path(), "err", err)
+			pollErr = err
 		}
 	}
+	if pollErr != nil {
+		// Return an error so PollLoop logs and retries; the cursor stays at
+		// the previous position so the failed window is re-covered next tick.
+		return fmt.Errorf("gitlab: poll cycle incomplete, cursor not advanced: %w", pollErr)
+	}
 
-	// Advance the cursor to this poll's start time so the next poll covers
-	// [pollStart, nextPollStart].  Duplicate events from the overlap window
-	// are tolerated; gaps would be permanent evidence loss.
+	// All projects fetched successfully: advance the durable cursor.
 	s.lastPollAt = pollStart
 	s.writeCursor()
 	return nil

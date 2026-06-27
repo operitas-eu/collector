@@ -1,11 +1,15 @@
 package gitlab
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
 	"operitas.eu/collector/internal/config"
+	"operitas.eu/collector/internal/envelope"
 )
 
 func TestDeployEventType(t *testing.T) {
@@ -147,5 +151,73 @@ func TestGitLabCursorMissingIsFirstRun(t *testing.T) {
 	s.loadCursor()
 	if !s.lastPollAt.IsZero() {
 		t.Errorf("expected zero lastPollAt on first run, got %v", s.lastPollAt)
+	}
+}
+
+// TestGitLabPollCursorNotAdvancedOnFailure is the core fail-closed regression
+// test. When any per-project sub-fetch errors, poll() must return a non-nil
+// error and must NOT advance or persist the cursor so PollLoop retries the
+// same window on the next tick.
+func TestGitLabPollCursorNotAdvancedOnFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a transient upstream outage on all endpoints.
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	s := &Source{
+		cfg: config.GitLabConfig{
+			BaseURL:      srv.URL,
+			Projects:     []string{"1"}, // skip membership enumeration
+			PollInterval: time.Minute,
+		},
+		http:       &http.Client{},
+		emit:       func(envelope.Event) {},
+		cursorPath: dir + "/cursor",
+	}
+
+	if err := s.poll(context.Background()); err == nil {
+		t.Fatal("poll() must return a non-nil error when a sub-fetch fails")
+	}
+	if !s.lastPollAt.IsZero() {
+		t.Errorf("cursor advanced on failure: lastPollAt = %v (want zero)", s.lastPollAt)
+	}
+	if _, statErr := os.Stat(dir + "/cursor"); !os.IsNotExist(statErr) {
+		t.Error("cursor file written despite poll failure — would cause evidence gap on next restart")
+	}
+}
+
+// TestGitLabPollCursorAdvancedOnSuccess verifies that a fully-successful poll
+// cycle advances the in-memory cursor and writes the durable cursor file.
+func TestGitLabPollCursorAdvancedOnSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return an empty JSON array for every endpoint (no MRs or deployments).
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("[]")) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	before := time.Now()
+	s := &Source{
+		cfg: config.GitLabConfig{
+			BaseURL:      srv.URL,
+			Projects:     []string{"1"},
+			PollInterval: time.Minute,
+		},
+		http:       &http.Client{},
+		emit:       func(envelope.Event) {},
+		cursorPath: dir + "/cursor",
+	}
+
+	if err := s.poll(context.Background()); err != nil {
+		t.Fatalf("unexpected poll error: %v", err)
+	}
+	if s.lastPollAt.IsZero() || s.lastPollAt.Before(before) {
+		t.Errorf("cursor not advanced after successful poll: lastPollAt=%v (want > %v)", s.lastPollAt, before)
+	}
+	if _, statErr := os.Stat(dir + "/cursor"); statErr != nil {
+		t.Errorf("cursor file not written after successful poll: %v", statErr)
 	}
 }

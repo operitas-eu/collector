@@ -185,20 +185,28 @@ func (s *Source) poll(ctx context.Context) error {
 		return err
 	}
 
+	// Fail-closed: track whether any per-repo fetch failed. If so, the cursor
+	// is NOT advanced so PollLoop retries the same [since, now] window on the
+	// next tick. At-least-once delivery with possible ledger-deduplicated
+	// duplicates is correct; a permanent gap is permanent evidence loss.
+	var pollErr error
 	for _, repo := range repos {
 		if err := s.pollPRs(ctx, repo, since); err != nil {
 			slog.Error("github: poll PRs failed", "repo", repo, "err", err)
+			pollErr = err
 		}
 		if err := s.pollDeployments(ctx, repo, since); err != nil {
 			slog.Error("github: poll deployments failed", "repo", repo, "err", err)
+			pollErr = err
 		}
 	}
+	if pollErr != nil {
+		// Return an error so PollLoop logs and retries; the cursor stays at
+		// the previous position so the failed window is re-covered next tick.
+		return fmt.Errorf("github: poll cycle incomplete, cursor not advanced: %w", pollErr)
+	}
 
-	// Advance the cursor to this poll's start time.  The next poll will
-	// therefore cover [pollStart, nextPollStart] with a small overlap handled
-	// by the 2x-interval fallback on first run.  Duplicate events that slip
-	// through the overlap window are tolerated: the ledger deduplicates on
-	// (tenant, source, event_id); a gap would be permanent evidence loss.
+	// All repos fetched successfully: advance the durable cursor.
 	s.lastPollAt = pollStart
 	s.writeCursor()
 	return nil
