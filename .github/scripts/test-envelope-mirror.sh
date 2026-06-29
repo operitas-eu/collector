@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-envelope-mirror.sh — self-test for envelope-mirror-check.sh (ADR-0022 §2).
 #
-# Exercises the four scenarios the conflict-only guard must handle correctly:
+# Exercises the five scenarios the conflict-only guard must handle correctly:
 #   1. Identical files in both repos          → pass (exit 0)
 #   2. File present only in collector         → pass (in-flight addition, not a conflict)
 #   3. File present only in monorepo          → pass (in-flight addition, not a conflict)
