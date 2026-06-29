@@ -90,9 +90,76 @@ jobs:
   # Add tests under helm/collector/tests/ and enable helm-unittest plugin here
   # when coverage is needed.
 
+  envelope-contract-mirror:
+    name: Envelope contract mirror (conflict-only, reciprocal)
+    # ADR-0022 §2: reciprocal conflict-only fixture mirror.
+    # Checks out the canonical monorepo and fails ONLY when a fixture present in
+    # BOTH repos has different content. A fixture present in only one repo is an
+    # in-flight lock-step addition, not a conflict. This eliminates the bootstrap
+    # deadlock that exact-equality bidirectional mirrors create.
+    #
+    # Requires repository secret: OPERITAS_REPO_READ_TOKEN
+    #   A fine-grained PAT with Contents: Read on operitas-eu/operitas (private).
+    #   Fork PRs cannot access org secrets and are automatically skipped by the
+    #   `if:` guard below; internal PRs and pushes to main always run the check.
+    #
+    # actions/checkout is SHA-pinned (supply-chain hygiene per ADR-0022 §2):
+    #   actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 = v4.2.2
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout collector (this repo)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          path: collector
+
+      - name: Verify OPERITAS_REPO_READ_TOKEN is configured
+        # Fail with a clear message rather than letting actions/checkout produce
+        # an opaque auth error when the secret has not been added yet.
+        # Setup: create a fine-grained PAT with Contents:Read on operitas-eu/operitas
+        # and store it as a repository secret named OPERITAS_REPO_READ_TOKEN.
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: OPERITAS_REPO_READ_TOKEN is not configured." >&2
+            echo "" >&2
+            echo "To enable the envelope mirror check:" >&2
+            echo "  1. Create a fine-grained PAT with Contents:Read on operitas-eu/operitas." >&2
+            echo "  2. Add it as a repository secret named OPERITAS_REPO_READ_TOKEN" >&2
+            echo "     under operitas-eu/collector Settings > Secrets and variables > Actions." >&2
+            exit 2
+          fi
+          echo "Token configured — proceeding with monorepo checkout."
+        env:
+          TOKEN: ${{ secrets.OPERITAS_REPO_READ_TOKEN }}
+
+      - name: Checkout monorepo (envelope fixtures, read-only, sparse)
+        # Not continue-on-error: a failed checkout must fail loudly. A silently
+        # skipped diff gives false assurance — see the azure_activity.json drift
+        # incident referenced in the monorepo's control-plane-ci.yaml.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          repository: operitas-eu/operitas
+          ref: master
+          path: operitas
+          token: ${{ secrets.OPERITAS_REPO_READ_TOKEN }}
+          sparse-checkout: infra/schemas/fixtures/envelope
+          sparse-checkout-cone-mode: true
+
+      - name: Self-test conflict-only comparison logic
+        # Verifies the comparison script behaves correctly before trusting its output.
+        # Tests: identical pass, collector-only pass, monorepo-only pass, same-path
+        # different-content fails (exit 1), empty dir errors (exit 2).
+        run: bash collector/.github/scripts/test-envelope-mirror.sh
+
+      - name: Conflict-only fixture mirror check (collector vs monorepo)
+        run: |
+          bash collector/.github/scripts/envelope-mirror-check.sh \
+            collector/internal/envelope/testdata/fixtures \
+            operitas/infra/schemas/fixtures/envelope
+
   build-image:
     name: Build container image (no push on PR)
-    needs: [lint, test, helm]
+    needs: [lint, test, helm, envelope-contract-mirror]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
