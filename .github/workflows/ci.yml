@@ -113,6 +113,25 @@ jobs:
         with:
           path: collector
 
+      - name: Verify OPERITAS_REPO_READ_TOKEN is configured
+        # Fail with a clear message rather than letting actions/checkout produce
+        # an opaque auth error when the secret has not been added yet.
+        # Setup: create a fine-grained PAT with Contents:Read on operitas-eu/operitas
+        # and store it as a repository secret named OPERITAS_REPO_READ_TOKEN.
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "ERROR: OPERITAS_REPO_READ_TOKEN is not configured." >&2
+            echo "" >&2
+            echo "To enable the envelope mirror check:" >&2
+            echo "  1. Create a fine-grained PAT with Contents:Read on operitas-eu/operitas." >&2
+            echo "  2. Add it as a repository secret named OPERITAS_REPO_READ_TOKEN" >&2
+            echo "     under operitas-eu/collector Settings > Secrets and variables > Actions." >&2
+            exit 2
+          fi
+          echo "Token configured — proceeding with monorepo checkout."
+        env:
+          TOKEN: ${{ secrets.OPERITAS_REPO_READ_TOKEN }}
+
       - name: Checkout monorepo (envelope fixtures, read-only, sparse)
         # Not continue-on-error: a failed checkout must fail loudly. A silently
         # skipped diff gives false assurance — see the azure_activity.json drift
