@@ -3,7 +3,7 @@ name: collector
 description: Read-only DORA evidence collector for the Operitas platform.
 type: application
 version: 0.4.1
-appVersion: "0.2.0"
+appVersion: "v0.2.0"
 keywords:
   - dora
   - compliance
