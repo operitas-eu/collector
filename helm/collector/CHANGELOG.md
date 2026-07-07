@@ -1,5 +1,21 @@
 # Changelog — collector Helm Chart
 
+## 0.4.1 — 2026-07-07
+
+### Fixed
+
+- `Chart.yaml` `version` had not actually been bumped to `0.4.0` when the
+  entry below was written and merged (PR #30) — `helm lint`/`helm package`
+  were still reporting chart version `0.3.0` even though the chart already
+  contained the `egressCidr`-required breaking change. Caught while
+  preparing the collector binary's `v0.2.0` release
+  (`operitas-eu/operitas#127`).
+- Default `image.tag` (`values.yaml`) and `appVersion` (`Chart.yaml`)
+  updated from the stale `0.1.0` / `0.3.0` to `0.2.0`, matching the
+  collector binary release this chart deploys by default. Running
+  `helm install ./helm/collector` with no `--set image.tag=...` override
+  was pulling an image three binary releases out of date.
+
 ## 0.4.0 — 2026-06-27
 
 ### BREAKING CHANGE

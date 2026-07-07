@@ -103,6 +103,21 @@ helm install operitas-collector ./helm/collector \
   ...
 ```
 
+The examples above install from a local checkout of this repo (`./helm/collector`).
+Each tagged release also publishes a versioned chart to the GHCR OCI registry:
+
+```bash
+helm pull oci://ghcr.io/operitas-eu/charts/collector --version 0.2.0
+```
+
+`helm pull` fetches whatever chart version was packaged and pushed by the
+`v0.2.0` release workflow run — this is independent of the chart's own
+`Chart.yaml` version (see `helm/collector/CHANGELOG.md`); the release
+workflow always packages the chart under the app's git tag, so the OCI
+version matches the app tag rather than the chart's own weekly-cadence
+SemVer. See "Suspected first-run breakages" in the release PR description
+for the versioning mismatch this creates.
+
 See `helm/collector/README.md` for the full values reference and IAM / GitHub
 App permission requirements.
 
@@ -114,7 +129,7 @@ docker run --rm \
   -e OPERITAS_INGEST_API_KEY=<api_key from portal> \
   -v /path/to/your/config.yaml:/config/config.yaml:ro \
   -v operitas-wal:/var/lib/operitas \
-  ghcr.io/operitas-eu/collector:0.1.0
+  ghcr.io/operitas-eu/collector:0.2.0
 ```
 
 The config file must contain at minimum:
@@ -157,9 +172,19 @@ docker logs operitas-collector
 On a healthy startup you will see:
 
 ```
-{"level":"INFO","msg":"collector starting","version":"0.1.0"}
+{"level":"INFO","msg":"collector starting","version":"dev"}
 {"level":"INFO","msg":"collector running","tenant_id":"...","collector_id":"..."}
 ```
+
+> **Known gap:** the container image does not yet embed the release tag in
+> `version` — it always reports `"dev"` because the release and CI workflows
+> pass a `BUILD_VERSION` build-arg that the `Dockerfile` does not consume (it
+> declares `ARG VERSION`). The standalone released binaries (the
+> `collector-vX.Y.Z-<os>-<arch>` assets on the GitHub Release) are not
+> affected — they embed the correct version via `-ldflags -X main.version`
+> directly in `go build`, with no Docker indirection. Tracked for a follow-up
+> fix to the image build args; do not rely on the container image's
+> `version` field to identify a deployed release until this is fixed.
 
 Any delivery failure logs at WARN (transient, will retry) or ERROR (permanent).
 A clean log stream with no WARN or ERROR lines means the collector is operating
