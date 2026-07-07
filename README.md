@@ -110,7 +110,7 @@ for what changed in each chart version — it moves independently of the
 binary's release tags):
 
 ```bash
-helm pull oci://ghcr.io/operitas-eu/charts/collector --version 0.4.1
+helm pull oci://ghcr.io/operitas-eu/charts/collector --version 0.4.2
 ```
 
 See `helm/collector/README.md` for the full values reference and IAM / GitHub
@@ -124,7 +124,7 @@ docker run --rm \
   -e OPERITAS_INGEST_API_KEY=<api_key from portal> \
   -v /path/to/your/config.yaml:/config/config.yaml:ro \
   -v operitas-wal:/var/lib/operitas \
-  ghcr.io/operitas-eu/collector:0.2.0
+  ghcr.io/operitas-eu/collector:0.2.1
 ```
 
 The config file must contain at minimum:
@@ -167,7 +167,7 @@ docker logs operitas-collector
 On a healthy startup you will see:
 
 ```
-{"level":"INFO","msg":"collector starting","version":"v0.2.0"}
+{"level":"INFO","msg":"collector starting","version":"v0.2.1"}
 {"level":"INFO","msg":"collector running","tenant_id":"...","collector_id":"..."}
 ```
 
