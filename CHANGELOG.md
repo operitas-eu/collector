@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI:** `security-scan`'s Trivy step now sets `limit-severities-for-sarif:
+  true`. Without it, `format: sarif` made `trivy-action` ignore the
+  `severity: CRITICAL,HIGH` filter when building the report, so
+  `exit-code: "1"` evaluated against every severity Trivy found, not just
+  CRITICAL/HIGH. The `v0.2.0` tag push (run `28879910225`) tripped this:
+  all artifact jobs (binaries, image, chart) succeeded, but the scan failed
+  and blocked `create-release`. The SARIF for that run actually contains 9
+  real HIGH findings (`golang.org/x/crypto` CVEs, fixed upstream in
+  `0.52.0`) plus 4 MEDIUM findings that should not have been eligible to
+  fail the gate at all. **This fix alone does not unblock `v0.2.0`** — the
+  9 HIGH findings are genuine and are correctly in-scope for
+  `severity: CRITICAL,HIGH`; `golang.org/x/crypto` needs bumping to
+  `>= 0.52.0` before a re-cut tag will pass this gate.
+
 ## [0.2.0] - 2026-07-07
 
 This is the first entry cut into this file — `CHANGELOG.md` did not exist
