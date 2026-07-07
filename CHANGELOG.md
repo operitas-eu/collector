@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-07
+
+`v0.2.0`'s tag exists on `origin` but was never actually released: its
+release run failed at the Trivy gate (see below) and never reached
+`create-release`, and the container image it did publish carries the
+`golang.org/x/crypto` findings fixed here. Per founder decision, `v0.2.0`
+is immutable evidence and is not re-pointed — this fixed release ships as
+`v0.2.1` instead, superseding `v0.2.0`.
+
 ### Fixed
 
 - **CI:** `security-scan`'s Trivy step now sets `limit-severities-for-sarif:

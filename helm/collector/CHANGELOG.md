@@ -1,5 +1,17 @@
 # Changelog — collector Helm Chart
 
+## 0.4.2 — 2026-07-07
+
+### Changed
+
+- Default `image.tag` (`values.yaml`) and `appVersion` (`Chart.yaml`)
+  updated from `0.2.0` / `v0.2.0` to `0.2.1` / `v0.2.1`. `v0.2.0`'s tag
+  exists but was never released (its release run failed the Trivy gate);
+  the founder decided not to re-point that immutable tag, so the fixed
+  binary release ships as `v0.2.1` instead. Chart version bumped as a
+  patch release per this chart's own SemVer discipline — no template or
+  values-schema changes, just the default image reference.
+
 ## 0.4.1 — 2026-07-07
 
 ### Fixed
