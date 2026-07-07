@@ -15,13 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `exit-code: "1"` evaluated against every severity Trivy found, not just
   CRITICAL/HIGH. The `v0.2.0` tag push (run `28879910225`) tripped this:
   all artifact jobs (binaries, image, chart) succeeded, but the scan failed
-  and blocked `create-release`. The SARIF for that run actually contains 9
-  real HIGH findings (`golang.org/x/crypto` CVEs, fixed upstream in
-  `0.52.0`) plus 4 MEDIUM findings that should not have been eligible to
-  fail the gate at all. **This fix alone does not unblock `v0.2.0`** — the
-  9 HIGH findings are genuine and are correctly in-scope for
-  `severity: CRITICAL,HIGH`; `golang.org/x/crypto` needs bumping to
-  `>= 0.52.0` before a re-cut tag will pass this gate.
+  and blocked `create-release`.
+
+### Security
+
+- Bumped `golang.org/x/crypto` `v0.51.0` -> `v0.52.0` (`go get
+  golang.org/x/crypto@v0.52.0 && go mod tidy`; no other modules moved).
+  Closes the 9 real HIGH-severity CVEs found in the `v0.2.0` release run
+  (CVE-2026-39827, -39828, -39829, -39830, -39832, -39835, -42508, -46595,
+  -46597) plus 4 MEDIUM ones (CVE-2026-39831, -39833, -39834, -46598) that
+  the SARIF bug above let slip through the gate unfiltered. `x/crypto` is
+  an existing transitive dependency (`// indirect`, pulled in by the Azure
+  SDK auth chain) — this is a version bump, not a new dependency.
+  Verified locally: `docker run aquasec/trivy:0.70.0 fs --severity
+  CRITICAL,HIGH,MEDIUM,LOW .` against the bumped `go.mod`/`go.sum` reports
+  0 vulnerabilities.
 
 ## [0.2.0] - 2026-07-07
 
