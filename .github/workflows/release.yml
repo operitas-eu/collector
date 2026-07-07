@@ -180,12 +180,18 @@ jobs:
             --password-stdin
 
       - name: Package chart
+        # Deliberately does NOT pass --version: the chart is versioned
+        # independently of the binary's release tags (weekly chart cadence
+        # vs. monthly binary cadence — see helm/collector/CHANGELOG.md).
+        # `helm package` with no --version uses Chart.yaml's own `version`
+        # field, so the OCI chart history stays consistent with the chart's
+        # own changelog. --app-version still records which binary tag this
+        # chart's default image.tag/appVersion were last aligned to.
         run: |
           TAG="${{ github.ref_name }}"
-          # Strip leading 'v' for Helm chart version (SemVer without prefix)
-          VERSION="${TAG#v}"
-          helm package helm/collector --version "${VERSION}" --app-version "${TAG}"
-          echo "CHART_PKG=collector-${VERSION}.tgz" >> "$GITHUB_ENV"
+          CHART_VERSION="$(grep -m1 '^version:' helm/collector/Chart.yaml | awk '{print $2}')"
+          helm package helm/collector --app-version "${TAG}"
+          echo "CHART_PKG=collector-${CHART_VERSION}.tgz" >> "$GITHUB_ENV"
 
       - name: Push chart to OCI registry
         run: |

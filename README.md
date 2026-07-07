@@ -103,6 +103,16 @@ helm install operitas-collector ./helm/collector \
   ...
 ```
 
+The examples above install from a local checkout of this repo (`./helm/collector`).
+Each tagged binary release also publishes the chart to the GHCR OCI registry,
+versioned by the chart's own `Chart.yaml` (see `helm/collector/CHANGELOG.md`
+for what changed in each chart version — it moves independently of the
+binary's release tags):
+
+```bash
+helm pull oci://ghcr.io/operitas-eu/charts/collector --version 0.4.1
+```
+
 See `helm/collector/README.md` for the full values reference and IAM / GitHub
 App permission requirements.
 
@@ -114,7 +124,7 @@ docker run --rm \
   -e OPERITAS_INGEST_API_KEY=<api_key from portal> \
   -v /path/to/your/config.yaml:/config/config.yaml:ro \
   -v operitas-wal:/var/lib/operitas \
-  ghcr.io/operitas-eu/collector:0.1.0
+  ghcr.io/operitas-eu/collector:0.2.0
 ```
 
 The config file must contain at minimum:
@@ -157,7 +167,7 @@ docker logs operitas-collector
 On a healthy startup you will see:
 
 ```
-{"level":"INFO","msg":"collector starting","version":"0.1.0"}
+{"level":"INFO","msg":"collector starting","version":"v0.2.0"}
 {"level":"INFO","msg":"collector running","tenant_id":"...","collector_id":"..."}
 ```
 
