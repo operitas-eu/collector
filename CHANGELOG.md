@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI:** `security-scan`'s Trivy step now sets `limit-severities-for-sarif:
+  true`. Without it, `format: sarif` made `trivy-action` ignore the
+  `severity: CRITICAL,HIGH` filter when building the report, so
+  `exit-code: "1"` evaluated against every severity Trivy found, not just
+  CRITICAL/HIGH. The `v0.2.0` tag push (run `28879910225`) tripped this:
+  all artifact jobs (binaries, image, chart) succeeded, but the scan failed
+  and blocked `create-release`.
+
+### Security
+
+- Bumped `golang.org/x/crypto` `v0.51.0` -> `v0.52.0` (`go get
+  golang.org/x/crypto@v0.52.0 && go mod tidy`; no other modules moved).
+  Closes the 9 real HIGH-severity CVEs found in the `v0.2.0` release run
+  (CVE-2026-39827, -39828, -39829, -39830, -39832, -39835, -42508, -46595,
+  -46597) plus 4 MEDIUM ones (CVE-2026-39831, -39833, -39834, -46598) that
+  the SARIF bug above let slip through the gate unfiltered. `x/crypto` is
+  an existing transitive dependency (`// indirect`, pulled in by the Azure
+  SDK auth chain) — this is a version bump, not a new dependency.
+  Verified locally: `docker run aquasec/trivy:0.70.0 fs --severity
+  CRITICAL,HIGH,MEDIUM,LOW .` against the bumped `go.mod`/`go.sum` reports
+  0 vulnerabilities.
+
 ## [0.2.0] - 2026-07-07
 
 This is the first entry cut into this file — `CHANGELOG.md` did not exist

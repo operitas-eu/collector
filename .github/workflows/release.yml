@@ -103,6 +103,17 @@ jobs:
           exit-code: "1"
           format: sarif
           output: trivy-results.sarif
+          # Footgun: with format: sarif and this flag left at its false
+          # default, trivy-action does not pass `severity` through to the
+          # underlying `trivy` invocation used to build the report — it scans
+          # and embeds every severity, and exit-code: "1" then evaluates
+          # against that unfiltered set instead of the CRITICAL,HIGH list
+          # above. Concretely: run 28879910225's SARIF carried 13 findings
+          # (9 HIGH + 4 MEDIUM, all golang.org/x/crypto CVEs) instead of the
+          # 9 HIGH the `severity` field above asks for — a MEDIUM-only repo
+          # would fail this gate even with zero CRITICAL/HIGH present. Same
+          # class of bug as operitas-eu/operitas#162.
+          limit-severities-for-sarif: true
 
       - name: Upload Trivy SARIF to GitHub Security
         uses: github/codeql-action/upload-sarif@v4
