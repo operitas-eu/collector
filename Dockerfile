@@ -4,8 +4,7 @@
 # Build reproducibility:
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
-#     --build-arg VERSION=$(git describe --tags --always) \
-#     --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+#     --build-arg BUILD_VERSION=$(git describe --tags --always) \
 #     -t ghcr.io/operitas-eu/collector:$(git describe --tags --always) \
 #     collector/
 
@@ -15,8 +14,12 @@ ARG DISTROLESS_TAG=nonroot
 # ---- build stage ----
 FROM golang:${GO_VERSION}-alpine AS build
 
-ARG VERSION=dev
-ARG BUILD_DATE=unknown
+# Must match the build-arg name passed by .github/workflows/release.yml and
+# .github/workflows/ci.yml (BUILD_VERSION) — a name mismatch here silently
+# drops the arg and every image reports main.version=dev regardless of the
+# tag it was built from. Verified empirically before this fix landed; see
+# CHANGELOG.md [0.2.0].
+ARG BUILD_VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
@@ -31,7 +34,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build \
       -trimpath \
-      -ldflags "-s -w -X main.version=${VERSION} -X main.buildDate=${BUILD_DATE} \
+      -ldflags "-s -w -X main.version=${BUILD_VERSION} \
                 -extldflags '-static'" \
       -o /out/collector \
       ./cmd/collector

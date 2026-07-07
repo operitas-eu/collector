@@ -63,6 +63,33 @@ bottom of this file for why the version number jumps from `0.1.2` to
 - **Redaction:** IP address redaction now preserves surrounding bytes exactly
   instead of collapsing whitespace around the replaced span, which had been
   corrupting adjacent evidence in hashed-PII mode.
+- **Release pipeline — container images always reported `version: "dev"`:**
+  `Dockerfile` declared `ARG VERSION` while `release.yml`/`ci.yml` passed a
+  `BUILD_VERSION` build-arg; Docker silently drops unconsumed build-args, so
+  every image ever built (including the `v0.1.0`-`v0.1.2` releases) baked in
+  `main.version=dev` regardless of the tag. Renamed the Dockerfile `ARG` to
+  `BUILD_VERSION` to match both workflows. Verified empirically: extracted
+  the built binary from a `docker build --build-arg BUILD_VERSION=v9.9.9`
+  image and ran it — it now logs `"version":"v9.9.9"`. The standalone
+  released binaries were never affected (they set `-X main.version` directly
+  via `go build`, no Docker indirection).
+- Removed the dead `ARG BUILD_DATE` / `-X main.buildDate=...` wiring in
+  `Dockerfile` — no `buildDate` variable has ever existed in
+  `cmd/collector/main.go`, so the linker flag was silently discarded on
+  every build. Not replaced; nothing consumed it.
+- **Release pipeline — OCI Helm chart was republished under the app's git
+  tag instead of its own version:** `release.yml`'s `package-helm` job ran
+  `helm package --version "${VERSION}"`, overriding whatever `Chart.yaml`
+  declared. Since the chart has its own weekly-cadence SemVer independent of
+  the collector binary's monthly release tags, this meant the OCI chart
+  history would never match `helm/collector/CHANGELOG.md`. Removed the
+  `--version` override so `helm package` uses `Chart.yaml`'s own `version`
+  field; `--app-version "${TAG}"` is kept so the packaged chart still
+  records which binary tag it was built alongside. Verified locally: with
+  `Chart.yaml` at `0.4.1`, `helm package helm/collector --app-version
+  v0.2.0` now produces `collector-0.4.1.tgz` with `appVersion: v0.2.0`
+  instead of a `collector-0.2.0.tgz` that discarded the chart's real
+  version.
 
 ### Security
 
@@ -76,6 +103,15 @@ bottom of this file for why the version number jumps from `0.1.2` to
   under sustained delivery failure.
 - `actions/checkout` SHA-pinned in the envelope-mirror CI job (supply-chain
   hygiene, ADR-0022 §2).
+
+### Follow-ups (not in this release)
+
+- **SBOM generation is not wired into `release.yml`.** No `syft`/
+  `sbom: true` step exists on the image or binary build jobs, despite the
+  monthly binary-release cadence calling for a refreshed SBOM. Deliberately
+  not added in this release — adding a new workflow step/tool is a separate
+  decision from fixing the three release-pipeline bugs above and is tracked
+  as a follow-up, not bundled in here.
 
 ### Dependencies
 
