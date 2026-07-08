@@ -387,28 +387,48 @@ private key to request, leak, or rotate. From `v0.2.2` onward, each release
 also publishes a Software Bill of Materials (SBOM) for the container image
 and for the Go module graph shared by all four platform binaries.
 
+Every artifact (image, binaries, both SBOMs) is signed or attested from
+within `.github/workflows/release.yml` itself — none of its jobs call out to
+a reusable/called workflow — so all of them share the same exact certificate
+identity, scoped to the tag that produced them:
+
+```
+https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/<tag>
+```
+
+Use `--certificate-identity` (exact match), not `--certificate-identity-regexp`:
+a regexp prefix match also accepts a certificate from any *other* workflow in
+this repository, which is broader than what actually signed the release. This
+is the same identity the trust portal documents for verifying `v0.2.1`. Note
+the extension: it's `release.yml` in this repository (`.yml`, not `.yaml`) —
+a prior verification round was burned by that exact mismatch.
+
 ### Container image
 
 ```bash
+TAG=v0.2.2
 IMAGE="ghcr.io/operitas-eu/collector:0.2.2"   # or pin by digest: ...@sha256:...
+IDENTITY="https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/${TAG}"
 
 # Verify the image signature:
 cosign verify "$IMAGE" \
-  --certificate-identity-regexp "^https://github.com/operitas-eu/collector/" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "$IDENTITY"
 
 # Verify the SBOM attestation and extract the SPDX document from it:
 cosign verify-attestation "$IMAGE" \
   --type spdxjson \
-  --certificate-identity-regexp "^https://github.com/operitas-eu/collector/" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "$IDENTITY" \
   | jq -r '.payload' | base64 -d | jq '.predicate' > collector-image.spdx.json
 ```
 
 ### Binaries
 
 ```bash
-BIN="collector-v0.2.2-linux-amd64"
+TAG=v0.2.2
+BIN="collector-${TAG}-linux-amd64"
+IDENTITY="https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/${TAG}"
 
 # Checksum, against SHA256SUMS downloaded from the release page:
 sha256sum -c <(grep "$BIN" SHA256SUMS)
@@ -416,8 +436,8 @@ sha256sum -c <(grep "$BIN" SHA256SUMS)
 # Signature, against the matching *.cosign.bundle release asset:
 cosign verify-blob "$BIN" \
   --bundle "$BIN.cosign.bundle" \
-  --certificate-identity-regexp "^https://github.com/operitas-eu/collector/" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "$IDENTITY"
 ```
 
 ### SBOMs
@@ -431,10 +451,13 @@ downloadable assets — no `cosign` required just to read them:
 | `collector-<tag>-source.spdx.json` | The Go module dependency graph (one document covers all four binaries — they are `CGO_ENABLED=0` static builds of the same `go.mod`/`go.sum`) | `cosign sign-blob`, bundle shipped as `collector-<tag>-source.spdx.json.cosign.bundle` |
 
 ```bash
-cosign verify-blob "collector-v0.2.2-source.spdx.json" \
-  --bundle "collector-v0.2.2-source.spdx.json.cosign.bundle" \
-  --certificate-identity-regexp "^https://github.com/operitas-eu/collector/" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+TAG=v0.2.2
+IDENTITY="https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/${TAG}"
+
+cosign verify-blob "collector-${TAG}-source.spdx.json" \
+  --bundle "collector-${TAG}-source.spdx.json.cosign.bundle" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity "$IDENTITY"
 ```
 
 ## Security
