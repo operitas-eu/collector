@@ -383,9 +383,10 @@ and GitHub App permissions.
 
 Every tagged release is signed with [cosign](https://docs.sigstore.dev/) in
 keyless mode via the repository's GitHub Actions OIDC identity — there is no
-private key to request, leak, or rotate. From `v0.2.2` onward, each release
-also publishes a Software Bill of Materials (SBOM) for the container image
-and for the Go module graph shared by all four platform binaries.
+private key to request, leak, or rotate. Starting with the first release
+after `v0.2.1`, each release also publishes a Software Bill of Materials
+(SBOM) for the container image and for the Go module graph shared by all
+four platform binaries.
 
 Every artifact (image, binaries, both SBOMs) is signed or attested from
 within `.github/workflows/release.yml` itself — none of its jobs call out to
@@ -406,8 +407,8 @@ a prior verification round was burned by that exact mismatch.
 ### Container image
 
 ```bash
-TAG=v0.2.2
-IMAGE="ghcr.io/operitas-eu/collector:0.2.2"   # or pin by digest: ...@sha256:...
+TAG=v0.3.0   # substitute the release tag you are verifying
+IMAGE="ghcr.io/operitas-eu/collector:${TAG#v}"   # or pin by digest: ...@sha256:...
 IDENTITY="https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/${TAG}"
 
 # Verify the image signature:
@@ -426,7 +427,7 @@ cosign verify-attestation "$IMAGE" \
 ### Binaries
 
 ```bash
-TAG=v0.2.2
+TAG=v0.3.0   # substitute the release tag you are verifying
 BIN="collector-${TAG}-linux-amd64"
 IDENTITY="https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/${TAG}"
 
@@ -451,7 +452,7 @@ downloadable assets — no `cosign` required just to read them:
 | `collector-<tag>-source.spdx.json` | The Go module dependency graph (one document covers all four binaries — they are `CGO_ENABLED=0` static builds of the same `go.mod`/`go.sum`) | `cosign sign-blob`, bundle shipped as `collector-<tag>-source.spdx.json.cosign.bundle` |
 
 ```bash
-TAG=v0.2.2
+TAG=v0.3.0   # substitute the release tag you are verifying
 IDENTITY="https://github.com/operitas-eu/collector/.github/workflows/release.yml@refs/tags/${TAG}"
 
 cosign verify-blob "collector-${TAG}-source.spdx.json" \
