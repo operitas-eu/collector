@@ -121,6 +121,43 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
+  sbom-source:
+    name: Generate and sign source SBOM
+    # One SBOM for the Go module graph, not one per matrix leg: all four
+    # build-binaries platforms are CGO_ENABLED=0 static builds of the same
+    # go.mod/go.sum, so a single source-level SBOM covers linux/amd64,
+    # linux/arm64, darwin/amd64, and darwin/arm64 without redundant scans.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: collector-${{ github.ref_name }}-source.spdx.json
+          upload-artifact: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SBOM (keyless)
+        run: |
+          cosign sign-blob \
+            --yes \
+            --bundle "collector-${{ github.ref_name }}-source.spdx.json.cosign.bundle" \
+            "collector-${{ github.ref_name }}-source.spdx.json"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-sbom
+          path: |
+            collector-${{ github.ref_name }}-source.spdx.json
+            collector-${{ github.ref_name }}-source.spdx.json.cosign.bundle
+          retention-days: 1
+
   build-image:
     name: Build, push, and sign container image
     runs-on: ubuntu-24.04
@@ -172,6 +209,29 @@ jobs:
             --yes \
             "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}"
 
+      - name: Generate image SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: collector-${{ github.ref_name }}-image.spdx.json
+          upload-artifact: false
+
+      - name: Attest image SBOM (keyless)
+        run: |
+          cosign attest \
+            --yes \
+            --predicate "collector-${{ github.ref_name }}-image.spdx.json" \
+            --type spdxjson \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}"
+
+      - name: Upload image SBOM artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: image-sbom
+          path: collector-${{ github.ref_name }}-image.spdx.json
+          retention-days: 1
+
   package-helm:
     name: Package and push Helm chart to OCI
     runs-on: ubuntu-24.04
@@ -217,7 +277,7 @@ jobs:
 
   create-release:
     name: Create GitHub release
-    needs: [build-binaries, security-scan, build-image, package-helm]
+    needs: [build-binaries, security-scan, sbom-source, build-image, package-helm]
     runs-on: ubuntu-24.04
     steps:
       - name: Download all build artifacts
@@ -242,4 +302,5 @@ jobs:
             release-assets/collector-*
             release-assets/SHA256SUMS
             release-assets/*.cosign.bundle
+            release-assets/*.spdx.json
             release-assets/*.tgz
